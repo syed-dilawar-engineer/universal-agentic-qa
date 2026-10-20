@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agentic QA Fixture Demo App</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-layout">
+    <header class="app-header">
+      <div class="header-brand">
+        <h1>Universal Agentic QA Fixture</h1>
+        <p class="subtitle">Controlled Testbed with Deterministic Defects</p>
+      </div>
+      <div class="header-controls">
+        <div id="fix-status" class="badge badge-defective" data-fixed="false">
+          Mode: Defective (Bugs Present)
+        </div>
+        <button id="toggle-fix-btn" class="btn btn-secondary" onclick="toggleFixMode()">
+          Toggle Fix Mode
+        </button>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <!-- Bug 1: Race Condition in Rapid Button Clicks -->
+      <section class="card defect-card" id="card-race-condition">
+        <div class="card-header">
+          <span class="defect-tag">Defect 1: Race Condition</span>
+          <h2>Rapid Submission Guard</h2>
+          <p class="description">
+            This submit button claims to disable immediately on click. When unfixed, its disabled
+            state is deferred asynchronously, allowing rapid repeated clicks to produce duplicate submissions.
+          </p>
+        </div>
+        <div class="card-body">
+          <div class="control-row">
+            <button id="submit-btn" class="btn btn-primary">
+              Submit Order
+            </button>
+            <div id="submission-count" class="metric-display" data-count="0">
+              Submissions: 0
+            </div>
+            <button id="reset-submissions-btn" class="btn btn-ghost" onclick="resetSubmissions()">
+              Reset
+            </button>
+          </div>
+          <div id="submission-alert" class="alert hidden" role="status"></div>
+        </div>
+      </section>
+
+      <!-- Bug 2: Mobile Responsive Layout Overflow -->
+      <section class="card defect-card" id="card-layout-overflow">
+        <div class="card-header">
+          <span class="defect-tag">Defect 2: Responsive Overflow</span>
+          <h2>Small Viewport Layout Overflow</h2>
+          <p class="description">
+            Container with inflexible minimum width (420px). On mobile screens with width &lt; 380px,
+            it breaches the viewport width and triggers horizontal scrolling.
+          </p>
+        </div>
+        <div class="card-body">
+          <div id="overflow-container" class="overflow-banner">
+            <div class="banner-badge">Promo Card (Width: 420px fixed when defective)</div>
+            <h3>Special Developer Preview Package</h3>
+            <p>Comprehensive test fixture evaluating responsive viewport integrity.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bug 3: Unhandled Console Error on Click -->
+      <section class="card defect-card" id="card-console-error">
+        <div class="card-header">
+          <span class="defect-tag">Defect 3: Unhandled Crash</span>
+          <h2>Unhandled Console Error</h2>
+          <p class="description">
+            Clicking this button calls a non-existent method on an uninitialized reference,
+            emitting an unhandled TypeError to window.onerror and the console.
+          </p>
+        </div>
+        <div class="card-body">
+          <div class="control-row">
+            <button id="broken-action-btn" class="btn btn-danger">
+              Trigger Unhandled Error
+            </button>
+            <div id="broken-action-status" class="status-indicator">
+              Status: Idle
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bug 4: Missing Accessible Label on Icon Button -->
+      <section class="card defect-card" id="card-accessibility">
+        <div class="card-header">
+          <span class="defect-tag">Defect 4: Accessibility Violation</span>
+          <h2>Unlabeled Icon Button</h2>
+          <p class="description">
+            An icon-only button without aria-label, title, or textual accessible name,
+            violating WCAG 2.1 AA 4.1.2 (Name, Role, Value).
+          </p>
+        </div>
+        <div class="card-body">
+          <div class="control-row">
+            <button id="icon-search-btn" class="icon-btn" type="button">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+            </button>
+            <span class="hint-text">Search catalog (missing accessible name when defective)</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>Universal Agentic QA Fixture • Controlled Defect Verification Harness</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

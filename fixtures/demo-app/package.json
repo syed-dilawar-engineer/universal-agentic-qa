@@ -1,0 +1,11 @@
+{
+  "name": "@agentic-qa/fixture-demo-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Controlled fixture web application with deliberate defects for QA verification",
+  "scripts": {
+    "start": "node server.js",
+    "start:fixed": "FIX_DEFECTS=true node server.js"
+  }
+}
