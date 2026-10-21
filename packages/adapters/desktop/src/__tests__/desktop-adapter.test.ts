@@ -9,8 +9,12 @@ import {
   MockCDPClient,
   UnityAltTesterAdapter,
   UnrealAutomationAdapter,
+  MockAltTesterClient,
+  MockUnrealRemoteControlClient,
   createGameEngineAdapter,
   CommandExecutor,
+  measureFrameRate,
+  makeFallbackPng,
 } from '../index.js';
 import {
   CapabilityRegistry,
@@ -229,8 +233,10 @@ describe('DesktopAdapter & Subsystems', () => {
     });
 
     it('Unity AltTester: connects successfully and evaluates actions/assertions truthfully', async () => {
+      const mockClient = new MockAltTesterClient();
       const unityAdapter = new UnityAltTesterAdapter({
         portProber: async () => true,
+        client: mockClient,
       });
 
       await unityAdapter.connect();
@@ -301,6 +307,15 @@ describe('DesktopAdapter & Subsystems', () => {
       expect(unityAdapter.isConnected()).toBe(false);
     });
 
+    it('Unity AltTester: truthfully reports BLOCKED when AltServer is unreachable without faking execution on a map', async () => {
+      const unityAdapter = new UnityAltTesterAdapter({
+        portProber: async () => true,
+        // no client provided -> real socket attempts to connect to 13000
+      });
+
+      await expect(unityAdapter.connect()).rejects.toThrow(QABlockedError);
+    });
+
     it('Unreal Automation: reports BLOCKED with explicit remediation when port 30010 is closed', async () => {
       const unrealAdapter = new UnrealAutomationAdapter({
         portProber: async () => false,
@@ -317,8 +332,10 @@ describe('DesktopAdapter & Subsystems', () => {
     });
 
     it('Unreal Automation: connects and evaluates actions/assertions truthfully', async () => {
+      const mockClient = new MockUnrealRemoteControlClient();
       const unrealAdapter = new UnrealAutomationAdapter({
         portProber: async () => true,
+        client: mockClient,
       });
 
       await unrealAdapter.connect();
@@ -365,6 +382,35 @@ describe('DesktopAdapter & Subsystems', () => {
       expect(visibleFail.passed).toBe(false);
 
       await unrealAdapter.disconnect();
+    });
+
+    it('Unreal Automation: truthfully reports BLOCKED when Remote Control API is unreachable without faking execution on a map', async () => {
+      const unrealAdapter = new UnrealAutomationAdapter({
+        portProber: async () => true,
+        // no client provided -> real HTTP attempts to reach 30010
+      });
+
+      await expect(unrealAdapter.connect()).rejects.toThrow(QABlockedError);
+    });
+
+    it('Game Engine: measures FPS and frame timing metrics truthfully', async () => {
+      const mockUnity = new MockAltTesterClient();
+      mockUnity.setFPS(60);
+      const unityAdapter = new UnityAltTesterAdapter({
+        portProber: async () => true,
+        client: mockUnity,
+      });
+      await unityAdapter.connect();
+
+      const metrics = await unityAdapter.measureFrameRate(100);
+      expect(metrics.fps).toBe(60);
+      expect(metrics.frameTimeMs).toBeGreaterThan(0);
+      expect(metrics.sampleDurationMs).toBe(100);
+
+      // Standalone helper
+      const standalone = await measureFrameRate(100);
+      expect(standalone.fps).toBeGreaterThan(0);
+      expect(standalone.frameTimeMs).toBeGreaterThan(0);
     });
 
     it('Unsupported game engine reports UNSUPPORTED and throws QAUnsupportedError', async () => {
@@ -749,6 +795,312 @@ describe('DesktopAdapter & Subsystems', () => {
       const crash = adapter.checkCrash();
       expect(crash.crashed).toBe(true);
       expect(crash.reason).toContain('Chromium render process terminated unexpectedly');
+
+      await adapter.teardown();
+    });
+
+    it('manages window minimize, restore, and blur across platforms', async () => {
+      const executedCommands: Array<{ cmd: string; args: string[] }> = [];
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        executedCommands.push({ cmd, args });
+        return { stdout: '', stderr: '', exitCode: 0 };
+      };
+
+      const wm = new WindowManager({
+        appName: 'TestApp',
+        platform: 'darwin',
+        commandExecutor: mockExecutor,
+      });
+
+      // 1. Focus
+      await wm.focus();
+      expect(wm.getIsFocused()).toBe(true);
+      expect(wm.getIsMinimized()).toBe(false);
+
+      // 2. Minimize
+      await wm.minimize();
+      expect(wm.getIsMinimized()).toBe(true);
+      expect(wm.getIsFocused()).toBe(false);
+      expect(executedCommands.some((c) => c.args.join(' ').includes('set miniaturized of window 1 to true'))).toBe(true);
+
+      // 3. Restore
+      await wm.restore();
+      expect(wm.getIsMinimized()).toBe(false);
+      expect(wm.getIsFocused()).toBe(true);
+      expect(executedCommands.some((c) => c.args.join(' ').includes('set miniaturized of window 1 to false'))).toBe(true);
+
+      // 4. Blur
+      await wm.blur();
+      expect(wm.getIsFocused()).toBe(false);
+    });
+
+    it('Windows resize calls Win32 SetWindowPos instead of printing MainWindowHandle', async () => {
+      const executedCommands: Array<{ cmd: string; args: string[] }> = [];
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        executedCommands.push({ cmd, args });
+        return { stdout: '', stderr: '', exitCode: 0 };
+      };
+
+      const wm = new WindowManager({
+        appName: 'WinApp',
+        platform: 'win32',
+        pid: 9876,
+        commandExecutor: mockExecutor,
+      });
+
+      await wm.resize(1600, 900);
+      expect(wm.getBounds().width).toBe(1600);
+      expect(wm.getBounds().height).toBe(900);
+
+      const winCall = executedCommands.find((c) => c.cmd === 'powershell');
+      expect(winCall).toBeDefined();
+      expect(winCall?.args.join(' ')).toContain('SetWindowPos');
+      expect(winCall?.args.join(' ')).toContain('1600');
+      expect(winCall?.args.join(' ')).toContain('900');
+    });
+
+    it('Windows close targets this.pid specifically without killing other user processes', async () => {
+      const executedCommands: Array<{ cmd: string; args: string[] }> = [];
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        executedCommands.push({ cmd, args });
+        return { stdout: '', stderr: '', exitCode: 0 };
+      };
+
+      const wm = new WindowManager({
+        appName: 'SharedBrowser',
+        platform: 'win32',
+        pid: 54321,
+        commandExecutor: mockExecutor,
+      });
+
+      await wm.close();
+      const psClose = executedCommands.find((c) => c.cmd === 'powershell');
+      expect(psClose).toBeDefined();
+      expect(psClose?.args.join(' ')).toContain('Stop-Process -Id 54321 -Force');
+      expect(psClose?.args.join(' ')).not.toContain('Stop-Process -Name "SharedBrowser"');
+    });
+  });
+
+  // ==========================================================================
+  // 5. Native Desktop Mode Actions, Assertions & OS Screenshot Capture
+  // ==========================================================================
+  describe('Native Desktop Mode Actions, Assertions & OS Screenshot Capture', () => {
+    it('executes native click with coordinates and window focus', async () => {
+      const executedCommands: Array<{ cmd: string; args: string[] }> = [];
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        executedCommands.push({ cmd, args });
+        if (cmd === 'which') return { stdout: '/usr/bin/osascript', stderr: '', exitCode: 0 };
+        return { stdout: 'Finder', stderr: '', exitCode: 0 };
+      };
+
+      const adapter = new DesktopAdapter({
+        targetType: 'native',
+        windowTitle: 'NativeStudio',
+        platformOverride: 'darwin',
+        commandExecutor: mockExecutor,
+        outputDir: testOutputDir,
+      });
+      await adapter.initialize();
+
+      const action = makeAction({
+        type: 'click',
+        target: '@250,450',
+      });
+      const result = await adapter.executeAction(action);
+      expect(result.success).toBe(true);
+      expect(result.output.nativeAction).toBe('click');
+      expect(result.output.clicked).toBe(true);
+      expect(result.output.coordinates).toEqual({ x: 250, y: 450 });
+
+      // Verify AppleScript click command was executed
+      expect(executedCommands.some((c) => c.args.join(' ').includes('click at {250, 450}'))).toBe(true);
+
+      await adapter.teardown();
+    });
+
+    it('executes native pressKey action with mapped keycode', async () => {
+      const executedCommands: Array<{ cmd: string; args: string[] }> = [];
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        executedCommands.push({ cmd, args });
+        if (cmd === 'which') return { stdout: '/usr/bin/osascript', stderr: '', exitCode: 0 };
+        return { stdout: 'Finder', stderr: '', exitCode: 0 };
+      };
+
+      const adapter = new DesktopAdapter({
+        targetType: 'native',
+        windowTitle: 'NativeStudio',
+        platformOverride: 'darwin',
+        commandExecutor: mockExecutor,
+        outputDir: testOutputDir,
+      });
+      await adapter.initialize();
+
+      const action = makeAction({
+        type: 'pressKey',
+        value: 'Enter',
+      });
+      const result = await adapter.executeAction(action);
+      expect(result.success).toBe(true);
+      expect(result.output.pressed).toBe(true);
+      expect(result.output.key).toBe('Enter');
+
+      // Verify key code 36 for Enter on macOS was sent
+      expect(executedCommands.some((c) => c.args.join(' ').includes('key code 36'))).toBe(true);
+
+      await adapter.teardown();
+    });
+
+    it('truthfully fails native assertions when element does not exist (no rubber-stamping)', async () => {
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        if (cmd === 'which') return { stdout: '/usr/bin/osascript', stderr: '', exitCode: 0 };
+        if (args.join(' ').includes('NOT_FOUND')) return { stdout: 'NOT_FOUND', stderr: '', exitCode: 0 };
+        return { stdout: '', stderr: '', exitCode: 0 };
+      };
+
+      const adapter = new DesktopAdapter({
+        targetType: 'native',
+        windowTitle: 'NativeStudio',
+        platformOverride: 'darwin',
+        commandExecutor: mockExecutor,
+        outputDir: testOutputDir,
+      });
+      await adapter.initialize();
+
+      // Assert non-existent element visible: MUST fail truthfully (actual=false), not rubber-stamp true!
+      const visRes = await adapter.executeAssertion(
+        makeAssertion({
+          type: 'elementVisible',
+          target: 'NonExistentModal',
+          expected: true,
+        })
+      );
+      expect(visRes.passed).toBe(false);
+      expect(visRes.actual).toBe(false);
+
+      // Assert non-existent element exists: MUST fail
+      const existsRes = await adapter.executeAssertion(
+        makeAssertion({
+          type: 'elementExists',
+          target: 'NonExistentModal',
+          expected: true,
+        })
+      );
+      expect(existsRes.passed).toBe(false);
+      expect(existsRes.actual).toBe(false);
+
+      await adapter.teardown();
+    });
+
+    it('passes native assertions truthfully when element is detected in UI tree', async () => {
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        if (cmd === 'which') return { stdout: '/usr/bin/osascript', stderr: '', exitCode: 0 };
+        const argStr = args.join(' ');
+        if (argStr.includes('SaveButton')) {
+          return { stdout: 'true:::Save Document:::true', stderr: '', exitCode: 0 };
+        }
+        return { stdout: 'Finder', stderr: '', exitCode: 0 };
+      };
+
+      const adapter = new DesktopAdapter({
+        targetType: 'native',
+        windowTitle: 'NativeStudio',
+        platformOverride: 'darwin',
+        commandExecutor: mockExecutor,
+        outputDir: testOutputDir,
+      });
+      await adapter.initialize();
+
+      // Visibility of detected element passes
+      const visRes = await adapter.executeAssertion(
+        makeAssertion({
+          type: 'elementVisible',
+          target: 'SaveButton',
+          expected: true,
+        })
+      );
+      expect(visRes.passed).toBe(true);
+
+      // Text comparison of detected element passes
+      const textRes = await adapter.executeAssertion(
+        makeAssertion({
+          type: 'elementTextEquals',
+          target: 'SaveButton',
+          expected: 'Save Document',
+        })
+      );
+      expect(textRes.passed).toBe(true);
+
+      await adapter.teardown();
+    });
+
+    it('native screenshot invokes OS tool and fallback generates valid non-1x1 PNG', async () => {
+      const executedCommands: Array<{ cmd: string; args: string[] }> = [];
+      const mockExecutor: CommandExecutor = async (cmd, args) => {
+        executedCommands.push({ cmd, args });
+        if (cmd === 'which') return { stdout: '/usr/bin/osascript', stderr: '', exitCode: 0 };
+        // Return exitCode 1 to simulate screenshot tool fallback path
+        if (cmd === 'screencapture') return { stdout: '', stderr: 'mocked display error', exitCode: 1 };
+        return { stdout: 'Finder', stderr: '', exitCode: 0 };
+      };
+
+      const adapter = new DesktopAdapter({
+        targetType: 'native',
+        windowTitle: 'NativeStudio',
+        platformOverride: 'darwin',
+        commandExecutor: mockExecutor,
+        outputDir: testOutputDir,
+      });
+      await adapter.initialize();
+
+      const evidence = await adapter.captureEvidence('SCREENSHOT', 'Native screenshot with fallback');
+      expect(evidence.type).toBe('SCREENSHOT');
+      expect(evidence.sizeBytes).toBeGreaterThan(100); // Much larger than 1x1 dummy PNG (which was 68 bytes)
+      expect(fs.existsSync(evidence.path)).toBe(true);
+
+      // Verify the file starts with the official 8-byte PNG signature
+      const fileBytes = fs.readFileSync(evidence.path);
+      const pngSig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      expect(fileBytes.subarray(0, 8).equals(pngSig)).toBe(true);
+
+      // Verify screencapture -x -C was attempted
+      expect(executedCommands.some((c) => c.cmd === 'screencapture' && c.args.includes('-x') && c.args.includes('-C'))).toBe(true);
+
+      // Verify helper makeFallbackPng directly
+      const samplePng = makeFallbackPng(100, 100);
+      expect(samplePng.subarray(0, 8).equals(pngSig)).toBe(true);
+      expect(samplePng.length).toBeGreaterThan(100);
+
+      await adapter.teardown();
+    });
+
+    it('convenience methods minimizeWindow, restoreWindow, and blurWindow operate cleanly', async () => {
+      const mockCDP = new MockCDPClient();
+      const adapter = new DesktopAdapter({
+        targetType: 'electron',
+        outputDir: testOutputDir,
+      });
+      adapter.setMockCDPClient(mockCDP);
+      await adapter.initialize({ mockCdpClient: mockCDP });
+
+      await expect(adapter.minimizeWindow()).resolves.not.toThrow();
+      await expect(adapter.restoreWindow()).resolves.not.toThrow();
+      await expect(adapter.blurWindow()).resolves.not.toThrow();
+
+      // Custom actions
+      const minAction = makeAction({ type: 'custom', target: 'window:minimize' });
+      const minRes = await adapter.executeAction(minAction);
+      expect(minRes.success).toBe(true);
+      expect(minRes.output.minimized).toBe(true);
+
+      const restAction = makeAction({ type: 'custom', target: 'window:restore' });
+      const restRes = await adapter.executeAction(restAction);
+      expect(restRes.success).toBe(true);
+      expect(restRes.output.restored).toBe(true);
+
+      const blurAction = makeAction({ type: 'custom', target: 'window:blur' });
+      const blurRes = await adapter.executeAction(blurAction);
+      expect(blurRes.success).toBe(true);
+      expect(blurRes.output.blurred).toBe(true);
 
       await adapter.teardown();
     });

@@ -14,7 +14,13 @@
     "start": "node ./dist/index.js"
   },
   "dependencies": {
+    "@agentic-qa/adapter-desktop": "workspace:*",
+    "@agentic-qa/adapter-mobile": "workspace:*",
+    "@agentic-qa/adapter-web": "workspace:*",
     "@agentic-qa/core": "workspace:*",
+    "@agentic-qa/engine-robustness": "workspace:*",
+    "@agentic-qa/engine-visual": "workspace:*",
+    "@agentic-qa/reporting": "workspace:*",
     "@agentic-qa/schemas": "workspace:*",
     "cli-table3": "^0.6.5",
     "commander": "^12.1.0",

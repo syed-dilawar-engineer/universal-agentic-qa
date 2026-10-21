@@ -13,6 +13,7 @@ import {
   ArtifactIntegrityResult,
   ArtifactQueryFilter,
 } from './types.js';
+import { redactSecrets } from '@agentic-qa/core';
 
 export function computeSha256(data: Buffer | Uint8Array | string): string {
   return crypto.createHash('sha256').update(data).digest('hex');
@@ -166,7 +167,7 @@ export class EvidenceStore {
   ): Promise<EvidenceArtifact> {
     return this.storeArtifact({
       type,
-      content,
+      content: redactSecrets(content),
       description,
       metadata,
     });
@@ -198,7 +199,7 @@ export class EvidenceStore {
   ): Promise<EvidenceArtifact> {
     return this.storeArtifact({
       type: 'DOM_SNAPSHOT',
-      content,
+      content: redactSecrets(content),
       mimeType: 'text/html',
       description,
       metadata,

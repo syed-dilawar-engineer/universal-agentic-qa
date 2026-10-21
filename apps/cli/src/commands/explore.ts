@@ -16,6 +16,7 @@ import { loadConfig } from '@agentic-qa/core';
 import { createDefaultRegistry } from '../utils/registry.js';
 import { saveReport, renderReportTerminal } from '../utils/reporter.js';
 import { CliLogger, pc } from '../output.js';
+import { MonkeyExplorer, BoundaryFuzzer } from '@agentic-qa/engine-robustness';
 
 export interface ExploreOptions {
   target?: string;
@@ -23,6 +24,8 @@ export interface ExploreOptions {
   seed?: string | number;
   duration?: string | number;
   platform?: Platform;
+  engine?: string;
+  fuzz?: boolean;
   config?: string;
   out?: string;
   json?: boolean;
@@ -134,6 +137,8 @@ export function registerExploreCommand(
     .option('-s, --seed <number>', 'Deterministic random seed for monkey actions', '42')
     .option('-d, --duration <seconds>', 'Maximum exploration duration in seconds', '60')
     .option('--platform <platform>', 'Target platform (web, mobile, desktop)', 'web')
+    .option('--engine <engine>', 'Exploration engine mode: plan, monkey, fuzzer, or all', 'plan')
+    .option('--fuzz', 'Run boundary fuzzer against target')
     .option('-c, --config <path>', 'Configuration file path')
     .option('-o, --out <path>', 'Destination path for run report JSON')
     .option('--json', 'Output machine-readable JSON')
@@ -185,6 +190,42 @@ export function registerExploreCommand(
             }
           },
         });
+
+        // Run specialized robustness engines if requested
+        if (options.engine === 'monkey' || options.engine === 'all') {
+          const explorer = new MonkeyExplorer(adapter);
+          try {
+            await adapter.initialize();
+            const monkeyResult = await explorer.run({
+              maxActions: maxSteps,
+              seed,
+              timeoutMs: (Number(options.duration) || 60) * 1000,
+            });
+            if (monkeyResult.findings.length > 0) {
+              report.findings.push(...monkeyResult.findings);
+              report.overallStatus = 'FAILED';
+            }
+          } catch {
+            // Ignore specialized run errors
+          }
+        }
+
+        if (options.fuzz || options.engine === 'fuzzer' || options.engine === 'all') {
+          const fuzzer = new BoundaryFuzzer(adapter);
+          try {
+            await adapter.initialize();
+            const fuzzResult = await fuzzer.run({
+              targetInput: 'input[type="text"], input:not([type]), textarea',
+              fuzzIterations: Math.min(maxSteps, 20),
+            });
+            if (fuzzResult.findings.length > 0) {
+              report.findings.push(...fuzzResult.findings);
+              report.overallStatus = 'FAILED';
+            }
+          } catch {
+            // Ignore specialized run errors
+          }
+        }
 
         const savedPath = saveReport(report, options.out);
 

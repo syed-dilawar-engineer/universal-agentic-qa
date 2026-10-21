@@ -61,4 +61,40 @@ export class SeededRandom {
     }
     return arr;
   }
+
+  /**
+   * Calculates exponential backoff with AWS Full Jitter:
+   * temp = min(capMs, baseMs * 2^attempt)
+   * sleep = random_between(0, temp)
+   */
+  backoffWithFullJitter(attempt: number, baseMs: number, capMs: number): number {
+    const safeAttempt = Math.max(0, attempt);
+    const exp = Math.min(safeAttempt, 31);
+    const temp = Math.min(capMs, baseMs * Math.pow(2, exp));
+    if (temp <= 0) return 0;
+    return Math.min(capMs, Math.floor(this.next() * (temp + 1)));
+  }
+
+  /**
+   * Picks a random element from an array weighted by weight values.
+   */
+  pickWeighted<T>(items: Array<{ item: T; weight: number }>): T {
+    if (items.length === 0) {
+      throw new Error('Cannot pick from an empty array');
+    }
+    const totalWeight = items.reduce((sum, entry) => sum + Math.max(0, entry.weight), 0);
+    if (totalWeight <= 0) {
+      throw new Error('Total weight must be positive');
+    }
+    let threshold = this.next() * totalWeight;
+    for (const entry of items) {
+      const w = Math.max(0, entry.weight);
+      if (w <= 0) continue;
+      if (threshold < w) {
+        return entry.item;
+      }
+      threshold -= w;
+    }
+    return items[items.length - 1].item;
+  }
 }

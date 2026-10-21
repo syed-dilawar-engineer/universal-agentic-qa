@@ -141,4 +141,34 @@ describe('RunLifecycle', () => {
     expect(report.findings[0].status).toBe('CONFIRMED');
     expect(report.evidence).toHaveLength(1);
   });
+
+  it('captures failure evidence and produces structured Finding when an action fails', async () => {
+    class FailingActionAdapter extends MockWebAdapter {
+      override async executeAction(action: ActionSpec) {
+        return {
+          success: false,
+          durationMs: 15,
+          error: 'Element #not-found not clickable at point (0, 0)',
+        };
+      }
+    }
+
+    const adapter = new FailingActionAdapter('AVAILABLE');
+    const caps = [await adapter.getCapability()];
+    const lifecycle = new RunLifecycle(adapter, plan, caps);
+
+    const report = await lifecycle.execute();
+    expect(report.overallStatus).toBe('FAILED');
+    expect(report.summary.failed).toBe(1);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].title).toBe('Failed action: click');
+    expect(report.findings[0].description).toBe(
+      'Element #not-found not clickable at point (0, 0)'
+    );
+    expect(report.findings[0].severity).toBe('HIGH');
+    expect(report.findings[0].status).toBe('CONFIRMED');
+    expect(report.findings[0].evidenceIds).toHaveLength(1);
+    expect(report.evidence).toHaveLength(1);
+    expect(report.evidence[0].id).toBe(report.findings[0].evidenceIds[0]);
+  });
 });

@@ -183,10 +183,11 @@ export class RapidInteractionRunner {
 
         for (const res of results) {
           if (res.success) {
-            // If the button is disabled or debounced, the click should not have been accepted
+            // Driver successfully dispatched the event.
+            // If the button was disabled after the initial trigger, the application UI rejected/ignored
+            // the event. Do NOT conflate driver event dispatch success with application event acceptance.
             if (buttonDisabledAfterTrigger) {
-              // Action accepted despite button being disabled -> debouncing / race bug
-              eventsAccepted++;
+              eventsRejected++;
             } else {
               eventsAccepted++;
             }
@@ -211,7 +212,11 @@ export class RapidInteractionRunner {
             })
           );
           if (res.success) {
-            eventsAccepted++;
+            if (buttonDisabledAfterTrigger) {
+              eventsRejected++;
+            } else {
+              eventsAccepted++;
+            }
           } else {
             eventsRejected++;
             if (res.error && !res.error.toLowerCase().includes('disabled') && !res.error.toLowerCase().includes('debounce')) {
@@ -238,9 +243,9 @@ export class RapidInteractionRunner {
         unhandledExceptions.push(`Duplicate submission check failed: ${err.message}`);
       }
     } else {
-      // If no custom checker, debouncing failure is indicated by accepting multiple events
-      // after the initial trigger was already fired
-      if (eventsAccepted > 0 && buttonDisabledAfterTrigger) {
+      // If no custom checker, debouncing failure is indicated if the button failed to disable
+      // and accepted multiple events, or if duplicate events were accepted when they should have been rejected.
+      if (!buttonDisabledAfterTrigger && eventsAccepted > 0) {
         duplicateSubmissionsDetected = true;
         duplicateCount = eventsAccepted;
       } else if (eventsAccepted > 1) {
@@ -254,10 +259,13 @@ export class RapidInteractionRunner {
     let uiHung = false;
 
     try {
+      // Check document.body / global responsive ping rather than targetButton,
+      // because legitimate submissions might navigate away or unmount the target button.
       const pingPromise = this.adapter.executeAssertion(
         createAssertionSpec({
           type: 'elementExists',
-          target: options.targetButton,
+          target: 'body',
+          message: 'UI responsiveness global health check',
         })
       );
 

@@ -12,6 +12,9 @@ import {
   HtmlReportOptions,
 } from './types.js';
 import { generateHtmlDashboard } from './html-template.js';
+import { formatTripartiteTitle } from './title-formatter.js';
+
+export { formatTripartiteTitle };
 
 export class ReportFormatter {
   // ==========================================================================
@@ -150,7 +153,8 @@ export class ReportFormatter {
     } else {
       for (const finding of report.findings) {
         const sevIcon = getSeverityIcon(finding.severity);
-        lines.push(`### ${sevIcon} [${finding.severity}] ${escapeMarkdown(finding.title)}`);
+        const formattedTitle = formatTripartiteTitle(finding);
+        lines.push(`### ${sevIcon} [${finding.severity}] ${escapeMarkdown(formattedTitle)}`);
         lines.push('');
         lines.push(`- **Finding ID:** \`${finding.id}\``);
         lines.push(`- **Status:** \`${finding.status}\` | **Fix Verification:** \`${finding.fixVerification}\``);
@@ -160,6 +164,21 @@ export class ReportFormatter {
         lines.push(`- **Reproducibility:** ${Math.round(finding.reproducibilitySuccessRate * 100)}% (${finding.reproducibilityCount} attempts)`);
         lines.push(`- **Description:** ${escapeMarkdown(finding.description)}`);
         lines.push('');
+
+        if (finding.rootCauseHypothesis) {
+          lines.push('**Root Cause Hypothesis:**');
+          lines.push(`- **Summary:** ${escapeMarkdown(finding.rootCauseHypothesis.summary)}`);
+          if (finding.rootCauseHypothesis.suspectedComponent) {
+            lines.push(`- **Suspected Component:** \`${escapeMarkdown(finding.rootCauseHypothesis.suspectedComponent)}\``);
+          }
+          if (finding.rootCauseHypothesis.theoreticalFlawType) {
+            lines.push(`- **Theoretical Flaw Type:** \`${escapeMarkdown(finding.rootCauseHypothesis.theoreticalFlawType)}\``);
+          }
+          if (finding.rootCauseHypothesis.suggestedFix) {
+            lines.push(`- **Suggested Fix:** ${escapeMarkdown(finding.rootCauseHypothesis.suggestedFix)}`);
+          }
+          lines.push('');
+        }
 
         if (finding.preconditions && finding.preconditions.length > 0) {
           lines.push('**Preconditions:**');
@@ -273,6 +292,14 @@ export class ReportFormatter {
     const resolvedPath = path.resolve(filePath);
     await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
     await fs.writeFile(resolvedPath, html, 'utf-8');
+  }
+
+  /**
+   * Enforces and formats tripartite defect titles:
+   * [Module/Feature] [Condition/Trigger] -> [Unexpected Behavior]
+   */
+  static formatTripartiteTitle(finding: Finding): string {
+    return formatTripartiteTitle(finding);
   }
 }
 

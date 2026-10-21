@@ -20,9 +20,27 @@ importers:
 
   apps/cli:
     dependencies:
+      '@agentic-qa/adapter-desktop':
+        specifier: workspace:*
+        version: link:../../packages/adapters/desktop
+      '@agentic-qa/adapter-mobile':
+        specifier: workspace:*
+        version: link:../../packages/adapters/mobile
+      '@agentic-qa/adapter-web':
+        specifier: workspace:*
+        version: link:../../packages/adapters/web
       '@agentic-qa/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@agentic-qa/engine-robustness':
+        specifier: workspace:*
+        version: link:../../packages/engines/robustness
+      '@agentic-qa/engine-visual':
+        specifier: workspace:*
+        version: link:../../packages/engines/visual
+      '@agentic-qa/reporting':
+        specifier: workspace:*
+        version: link:../../packages/reporting
       '@agentic-qa/schemas':
         specifier: workspace:*
         version: link:../../packages/schemas
@@ -48,9 +66,21 @@ importers:
 
   apps/mcp-server:
     dependencies:
+      '@agentic-qa/adapter-desktop':
+        specifier: workspace:*
+        version: link:../../packages/adapters/desktop
+      '@agentic-qa/adapter-mobile':
+        specifier: workspace:*
+        version: link:../../packages/adapters/mobile
+      '@agentic-qa/adapter-web':
+        specifier: workspace:*
+        version: link:../../packages/adapters/web
       '@agentic-qa/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@agentic-qa/reporting':
+        specifier: workspace:*
+        version: link:../../packages/reporting
       '@agentic-qa/schemas':
         specifier: workspace:*
         version: link:../../packages/schemas

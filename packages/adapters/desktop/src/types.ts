@@ -39,6 +39,15 @@ export interface GameObjectState {
   metadata?: Record<string, any>;
 }
 
+export interface FrameRateMetrics {
+  fps: number;
+  frameTimeMs: number;
+  minFps?: number;
+  maxFps?: number;
+  sampleDurationMs: number;
+  droppedFrames?: number;
+}
+
 export interface GameEngineHookCheckResult {
   engine: GameEngineType;
   state: CapabilityState;
@@ -63,6 +72,7 @@ export interface DesktopAdapterConfig {
   processName?: string;
   gameEngine?: GameEngineType;
   gamePort?: number;
+  gameClient?: any;
   outputDir?: string;
   platformOverride?: 'darwin' | 'win32' | 'linux';
   commandExecutor?: CommandExecutor;

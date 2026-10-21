@@ -55,6 +55,7 @@ export function registerTestCommand(
 ): void {
   program
     .command('test')
+    .alias('run')
     .description('Execute test plan against target using RunLifecycle')
     .option('-p, --plan <path>', 'Path to test plan JSON file')
     .option('-t, --target <target>', 'Target URL or application override')

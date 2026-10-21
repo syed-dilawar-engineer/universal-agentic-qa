@@ -25,6 +25,9 @@ import {
   handleVerifyFix,
 } from './tools/index.js';
 import { HttpApiPlatformAdapter } from './adapters/http-api-adapter.js';
+import { WebAdapter } from '@agentic-qa/adapter-web';
+import { MobileAdapter } from '@agentic-qa/adapter-mobile';
+import { DesktopAdapter } from '@agentic-qa/adapter-desktop';
 
 export interface CreateMcpServerOptions {
   name?: string;
@@ -36,7 +39,10 @@ export interface CreateMcpServerOptions {
 
 export function createDefaultCapabilityRegistry(): CapabilityRegistry {
   const registry = new CapabilityRegistry();
-  // Register built-in native HTTP adapter for API tests
+  // Register full suite of real platform adapters
+  registry.registerAdapter(new WebAdapter());
+  registry.registerAdapter(new MobileAdapter());
+  registry.registerAdapter(new DesktopAdapter());
   registry.registerAdapter(new HttpApiPlatformAdapter());
   return registry;
 }
@@ -45,8 +51,101 @@ function truncateOutput(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text;
   }
-  const truncated = text.substring(0, maxChars);
-  return `${truncated}\n\n[Output truncated from ${text.length} down to ${maxChars} characters to avoid context overflow. Use qa_get_evidence or qa_generate_report for full artifact content.]`;
+
+  // Try to parse structured JSON to avoid emitting syntax errors to LLM clients
+  try {
+    const parsed = JSON.parse(text);
+    return pruneJsonOutput(parsed, text.length, maxChars);
+  } catch {
+    // For non-JSON (plain text, markdown), perform clean substring truncation
+    const truncated = text.substring(0, maxChars);
+    return `${truncated}\n\n[Output truncated from ${text.length} down to ${maxChars} characters to avoid context overflow. Use qa_get_evidence or qa_generate_report for full artifact content.]`;
+  }
+}
+
+function pruneJsonOutput(data: any, originalLength: number, maxChars: number): string {
+  const notice = `[Output truncated from ${originalLength} down to ${maxChars} characters to avoid context overflow. Use qa_get_evidence or qa_generate_report for full artifact content.]`;
+
+  if (typeof data !== 'object' || data === null) {
+    return JSON.stringify({
+      _truncated: true,
+      _warning: notice,
+      value: String(data).slice(0, 100),
+    });
+  }
+
+  const clone = JSON.parse(JSON.stringify(data));
+  clone._truncation = notice;
+
+  let serialized = JSON.stringify(clone, null, 2);
+  if (serialized.length <= maxChars) {
+    return serialized;
+  }
+
+  // Prune long strings inside top-level properties
+  for (const key of Object.keys(clone)) {
+    if (typeof clone[key] === 'string' && clone[key].length > 200 && key !== '_truncation') {
+      clone[key] = clone[key].slice(0, 150) + '... [truncated]';
+    }
+  }
+
+  serialized = JSON.stringify(clone, null, 2);
+  if (serialized.length <= maxChars) {
+    return serialized;
+  }
+
+  // Prune long arrays gracefully (e.g. findings, testResults, capabilities, trace, etc.)
+  let anyArrayReduced = true;
+  while (anyArrayReduced && JSON.stringify(clone, null, 2).length > maxChars) {
+    anyArrayReduced = false;
+    for (const key of Object.keys(clone)) {
+      if (Array.isArray(clone[key]) && clone[key].length > 1) {
+        const half = Math.max(1, Math.floor(clone[key].length / 2));
+        clone[key] = clone[key].slice(0, half);
+        anyArrayReduced = true;
+      }
+    }
+  }
+
+  serialized = JSON.stringify(clone, null, 2);
+  if (serialized.length <= maxChars) {
+    return serialized;
+  }
+
+  // Empty out arrays if still too large
+  for (const key of Object.keys(clone)) {
+    if (Array.isArray(clone[key])) {
+      clone[`_${key}Count`] = clone[key].length;
+      clone[key] = [];
+    }
+  }
+
+  serialized = JSON.stringify(clone, null, 2);
+  if (serialized.length <= maxChars) {
+    return serialized;
+  }
+
+  // Fall back to minimal valid JSON representation within maxChars
+  const minimal = {
+    _truncated: true,
+    _warning: notice,
+  };
+  const minIndented = JSON.stringify(minimal, null, 2);
+  if (minIndented.length <= maxChars) {
+    return minIndented;
+  }
+
+  const minCompact = JSON.stringify(minimal);
+  if (minCompact.length <= maxChars) {
+    return minCompact;
+  }
+
+  // In extreme cases where maxChars is tiny, ensure valid JSON with bounded notice
+  const noticeBudget = Math.max(25, maxChars - 30);
+  return JSON.stringify({
+    _truncated: true,
+    _warning: notice.slice(0, noticeBudget) + '...]',
+  });
 }
 
 async function withTimeout<T>(

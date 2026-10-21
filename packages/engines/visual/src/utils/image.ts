@@ -2,7 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { PNG } from 'pngjs';
+export { PNG };
 import type { MaskRegion } from '../types.js';
+
+/**
+ * Creates a blank PNG image with given width and height.
+ */
+export function createBlankPng(width: number, height: number): PNG {
+  const png = new PNG({ width, height });
+  png.data.fill(255); // Default white opaque
+  return png;
+}
 
 /**
  * Loads a PNG from a file path or Buffer.

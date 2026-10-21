@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
 import {
   PlatformAdapter,
   ActionResult,
@@ -10,6 +14,7 @@ import {
   AssertionSpec,
   EvidenceArtifact,
 } from '@agentic-qa/schemas';
+import { writePngBuffer, createBlankPng } from '@agentic-qa/engine-visual';
 
 export interface MockAdapterOptions {
   id?: string;
@@ -90,13 +95,25 @@ export class CliMockAdapter implements PlatformAdapter {
   }
 
   async captureEvidence(type: string, description?: string): Promise<EvidenceArtifact> {
+    const ext = type === 'SCREENSHOT' || !type ? 'png' : 'txt';
+    const mockFile = path.join(os.tmpdir(), `mock-evidence-${Date.now()}-${Math.floor(Math.random() * 1000)}.${ext}`);
+    let buffer: Buffer;
+
+    if (ext === 'png') {
+      buffer = writePngBuffer(createBlankPng(800, 600));
+    } else {
+      buffer = Buffer.from(description || 'mock-content');
+    }
+    fs.writeFileSync(mockFile, buffer);
+    const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+
     return {
-      id: `ev-mock-${Date.now()}`,
+      id: `ev-mock-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       type: (type as any) || 'SCREENSHOT',
-      path: '/tmp/mock-evidence.png',
-      sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-      sizeBytes: 128,
-      mimeType: 'image/png',
+      path: mockFile,
+      sha256,
+      sizeBytes: buffer.length,
+      mimeType: ext === 'png' ? 'image/png' : 'text/plain',
       capturedAt: new Date().toISOString(),
       description: description || 'Mock evidence snapshot',
       metadata: {},

@@ -15,6 +15,8 @@ import {
   ActionResult,
   AssertionResult,
   QAAdapterError,
+  isBlockedMetadataUrl,
+  redactSecrets,
 } from '@agentic-qa/core';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import {
@@ -206,9 +208,38 @@ export class WebAdapter implements PlatformAdapter {
       ...merged.contextOptions,
     });
 
+    await this.setupRouteSecurity(this.context);
+
     this.page = await this.context.newPage();
     this.setupPageListeners(this.page);
     this.isInitialized = true;
+  }
+
+  /**
+   * Sets up route interception to block outbound requests to cloud metadata endpoints (SSRF protection).
+   */
+  private async setupRouteSecurity(context: BrowserContext): Promise<void> {
+    try {
+      if (typeof (context as any).route === 'function') {
+        await context.route('**/*', (route) => {
+          const reqUrl = route.request().url();
+          const check = isBlockedMetadataUrl(reqUrl);
+          if (check.blocked) {
+            this.networkFailures.push({
+              url: reqUrl,
+              method: route.request().method(),
+              errorText: `Request blocked by cloud metadata security policy: ${check.reason}`,
+              timestamp: new Date().toISOString(),
+            });
+            route.abort('blockedbyclient').catch(() => {});
+            return;
+          }
+          route.continue().catch(() => {});
+        });
+      }
+    } catch {
+      // Mock contexts without route support ignore gracefully
+    }
   }
 
   /**
@@ -229,7 +260,10 @@ export class WebAdapter implements PlatformAdapter {
       };
 
       this.consoleLogs.push(entry);
-      if (type === 'error') {
+      const isReactHydrationWarn =
+        (type === 'warning' || (type as string) === 'warn') &&
+        (/hydration/i.test(text) || /did not match/i.test(text));
+      if (type === 'error' || isReactHydrationWarn) {
         this.consoleErrors.push(entry);
       }
     });
@@ -306,6 +340,20 @@ export class WebAdapter implements PlatformAdapter {
             throw new Error('navigate action requires a target or value URL');
           }
           const url = String(rawUrl);
+          const secCheck = isBlockedMetadataUrl(url);
+          if (secCheck.blocked) {
+            throw new Error(`Navigation blocked by security policy: ${secCheck.reason}`);
+          }
+
+          if (action.metadata?.viewport) {
+            const vp = typeof action.metadata.viewport === 'object'
+              ? action.metadata.viewport
+              : resolveViewport(action.metadata.viewport);
+            if (vp && typeof vp.width === 'number' && typeof vp.height === 'number') {
+              await this.page.setViewportSize({ width: vp.width, height: vp.height });
+            }
+          }
+
           const waitUntil = action.metadata?.waitUntil || 'load';
           const response = await this.page.goto(url, { timeout: timeoutMs, waitUntil });
           output = {
@@ -339,6 +387,7 @@ export class WebAdapter implements PlatformAdapter {
           break;
         }
 
+        case 'pasteText':
         case 'fill': {
           if (!action.target) {
             throw new Error('fill action requires a target selector');
@@ -452,7 +501,11 @@ export class WebAdapter implements PlatformAdapter {
           if (!action.target) {
             throw new Error('rapidClicks action requires a target selector');
           }
-          const count = Number(action.value ?? action.metadata?.count ?? 50);
+          const countRaw =
+            typeof action.value === 'object' && action.value !== null
+              ? (action.value.count ?? 50)
+              : (action.value ?? action.metadata?.count ?? 50);
+          const count = Number(countRaw) || 50;
           const intervalMs = Number(action.metadata?.intervalMs ?? 5);
           const locator = this.page.locator(action.target);
           await locator.waitFor({ state: 'visible', timeout: timeoutMs });
@@ -475,6 +528,36 @@ export class WebAdapter implements PlatformAdapter {
           }
           const result = await this.page.evaluate(action.value);
           output = { result };
+          break;
+        }
+
+        case 'goBack': {
+          const waitUntil = action.metadata?.waitUntil || 'load';
+          const response = await this.page.goBack({ timeout: timeoutMs, waitUntil });
+          output = {
+            url: this.page.url(),
+            status: response ? response.status() : undefined,
+          };
+          break;
+        }
+
+        case 'goForward': {
+          const waitUntil = action.metadata?.waitUntil || 'load';
+          const response = await this.page.goForward({ timeout: timeoutMs, waitUntil });
+          output = {
+            url: this.page.url(),
+            status: response ? response.status() : undefined,
+          };
+          break;
+        }
+
+        case 'reload': {
+          const waitUntil = action.metadata?.waitUntil || 'load';
+          const response = await this.page.reload({ timeout: timeoutMs, waitUntil });
+          output = {
+            url: this.page.url(),
+            status: response ? response.status() : undefined,
+          };
           break;
         }
 
@@ -685,12 +768,62 @@ export class WebAdapter implements PlatformAdapter {
         }
 
         case 'status200': {
-          const lastReq = this.networkRequests[this.networkRequests.length - 1];
-          actual = lastReq?.status;
-          expected = 200;
-          passed = actual === 200;
+          let matchedReq: NetworkRequestEntry | undefined;
+
+          const targetPattern =
+            assertion.target ||
+            assertion.metadata?.url ||
+            (typeof (assertion as any).value === 'string' ? (assertion as any).value : undefined);
+
+          if (targetPattern) {
+            const patternStr = String(targetPattern);
+            matchedReq = [...this.networkRequests].reverse().find((req) => {
+              try {
+                const regex = new RegExp(patternStr);
+                return regex.test(req.url) || req.url.includes(patternStr);
+              } catch {
+                return req.url.includes(patternStr);
+              }
+            });
+          } else {
+            // Check main document navigation request matching current page URL
+            const pageUrl = this.page.url();
+            const cleanPageUrl = pageUrl.split('#')[0].replace(/\/$/, '');
+
+            matchedReq = [...this.networkRequests].reverse().find((req) => {
+              const cleanReqUrl = req.url.split('#')[0].replace(/\/$/, '');
+              return cleanReqUrl === cleanPageUrl;
+            });
+
+            // If no direct match to pageUrl, filter out 204 beacons and favicons/static assets
+            if (!matchedReq) {
+              const candidates = this.networkRequests.filter((req) => {
+                if (req.status === 204) return false;
+                if (/favicon\.ico|\/favicon/i.test(req.url)) return false;
+                if (/\.(png|jpe?g|gif|svg|webp|woff2?|ttf|eot)(\?.*)?$/i.test(req.url)) return false;
+                return true;
+              });
+              matchedReq = candidates[candidates.length - 1];
+            }
+
+            // Fallback if all were filtered
+            if (!matchedReq) {
+              matchedReq = this.networkRequests[this.networkRequests.length - 1];
+            }
+          }
+
+          actual = matchedReq?.status;
+          expected = Number(assertion.expected ?? 200);
+          passed = actual === expected;
           if (!message) {
-            message = passed ? 'Last HTTP status was 200.' : `Expected status 200, got ${actual}.`;
+            const targetDesc = matchedReq?.url
+              ? `"${matchedReq.url}"`
+              : targetPattern
+                ? `pattern "${targetPattern}"`
+                : 'main document';
+            message = passed
+              ? `HTTP status for ${targetDesc} was ${actual}.`
+              : `Expected HTTP status ${expected} for ${targetDesc}, but got ${actual ?? 'no response'}.`;
           }
           break;
         }
@@ -727,8 +860,340 @@ export class WebAdapter implements PlatformAdapter {
           break;
         }
 
+        case 'noAccessibilityViolations': {
+          if (assertion.target) {
+            const target = assertion.target;
+            const a11yData = await this.page.evaluate((sel: string) => {
+              const el = document.querySelector(sel);
+              if (!el) return null;
+              const ariaLabel = el.getAttribute('aria-label');
+              const title = el.getAttribute('title');
+              const ariaLabelledBy = el.getAttribute('aria-labelledby');
+              const text = el.textContent?.trim() || '';
+              const imgAlt = el.querySelector('img')?.getAttribute('alt');
+              const hasName = Boolean(ariaLabel || title || ariaLabelledBy || text || imgAlt);
+              return { hasName, ariaLabel, title };
+            }, target);
+
+            if (!a11yData) {
+              throw new Error(`Element "${target}" not found for accessibility assertion`);
+            }
+            passed = a11yData.hasName;
+            expected = true;
+            actual = a11yData.hasName;
+            if (!message) {
+              message = passed
+                ? `Element "${target}" has valid accessible name per WCAG 2.1 AA 4.1.2.`
+                : `Element "${target}" violates WCAG 2.1 AA 4.1.2: missing accessible name.`;
+            }
+          } else {
+            // Full-page DOM accessibility audit
+            const violations = await this.page.evaluate(() => {
+              const issues: Array<{ type: string; selector: string; details: string }> = [];
+
+              function getSelector(el: Element): string {
+                if (el.id) return `#${el.id}`;
+                let sel = el.tagName.toLowerCase();
+                if (el.className && typeof el.className === 'string') {
+                  const cls = el.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+                  if (cls) sel += `.${cls}`;
+                }
+                return sel;
+              }
+
+              // 1. Missing image alt attribute (WCAG 1.1.1)
+              const images = Array.from(document.querySelectorAll('img:not([alt])'));
+              for (const img of images) {
+                issues.push({
+                  type: 'MISSING_ALT',
+                  selector: getSelector(img),
+                  details: '<img> element missing alt attribute (WCAG 1.1.1)',
+                });
+              }
+
+              // 2. Buttons without accessible name (WCAG 4.1.2)
+              const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+              for (const btn of buttons) {
+                const ariaLabel = btn.getAttribute('aria-label');
+                const ariaLabelledBy = btn.getAttribute('aria-labelledby');
+                const title = btn.getAttribute('title');
+                const text = btn.textContent?.trim() || '';
+                const imgAlt = btn.querySelector('img')?.getAttribute('alt');
+                if (!ariaLabel && !ariaLabelledBy && !title && !text && !imgAlt) {
+                  issues.push({
+                    type: 'MISSING_BUTTON_NAME',
+                    selector: getSelector(btn),
+                    details: 'Button has no accessible name (WCAG 4.1.2)',
+                  });
+                }
+              }
+
+              // 3. Links without accessible name (WCAG 2.4.4 / 4.1.2)
+              const links = Array.from(document.querySelectorAll('a[href]'));
+              for (const a of links) {
+                const ariaLabel = a.getAttribute('aria-label');
+                const ariaLabelledBy = a.getAttribute('aria-labelledby');
+                const title = a.getAttribute('title');
+                const text = a.textContent?.trim() || '';
+                const imgAlt = a.querySelector('img')?.getAttribute('alt');
+                if (!ariaLabel && !ariaLabelledBy && !title && !text && !imgAlt) {
+                  issues.push({
+                    type: 'MISSING_LINK_NAME',
+                    selector: getSelector(a),
+                    details: 'Link has no accessible name (WCAG 2.4.4 / 4.1.2)',
+                  });
+                }
+              }
+
+              // 4. Form inputs without associated labels (WCAG 1.3.1 / 4.1.2)
+              const inputs = Array.from(
+                document.querySelectorAll(
+                  'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]), select, textarea'
+                )
+              );
+              for (const input of inputs) {
+                const ariaLabel = input.getAttribute('aria-label');
+                const ariaLabelledBy = input.getAttribute('aria-labelledby');
+                const title = input.getAttribute('title');
+                const placeholder = input.getAttribute('placeholder');
+                const id = input.id;
+                const hasLabelFor = id ? Boolean(document.querySelector(`label[for="${id}"]`)) : false;
+                const hasParentLabel = Boolean(input.closest && input.closest('label'));
+
+                if (!ariaLabel && !ariaLabelledBy && !title && !placeholder && !hasLabelFor && !hasParentLabel) {
+                  issues.push({
+                    type: 'MISSING_INPUT_LABEL',
+                    selector: getSelector(input),
+                    details: 'Form input missing associated label or accessible name (WCAG 1.3.1 / 4.1.2)',
+                  });
+                }
+              }
+
+              return issues;
+            });
+
+            actual = violations.length;
+            expected = 0;
+            passed = violations.length === 0;
+
+            if (!message) {
+              message = passed
+                ? 'Page accessibility inspection passed with 0 violations.'
+                : `Page accessibility inspection detected ${violations.length} violation(s):\n` +
+                  violations.map((v, idx) => `  [${idx + 1}] ${v.type} on ${v.selector}: ${v.details}`).join('\n');
+            }
+          }
+          break;
+        }
+
+        case 'noHydrationMismatch': {
+          const hydrationErrors: ConsoleEntry[] = [];
+          const seen = new Set<string>();
+          for (const entry of [...this.consoleErrors, ...this.consoleLogs]) {
+            const key = `${entry.type}:${entry.text}:${entry.location ?? ''}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            if (this.isReactHydrationError(entry)) {
+              hydrationErrors.push(entry);
+            }
+          }
+
+          actual = hydrationErrors.length;
+          expected = 0;
+          passed = hydrationErrors.length === 0;
+
+          if (!message) {
+            message = passed
+              ? 'No React hydration mismatches detected in console or page errors.'
+              : `Detected ${hydrationErrors.length} React hydration mismatch error(s):\n` +
+                hydrationErrors.map((e, idx) => `  [${idx + 1}] (${e.type}) ${e.text}`).join('\n');
+          }
+          break;
+        }
+
+        case 'isElementOccluded': {
+          if (!assertion.target) throw new Error('isElementOccluded assertion requires a target selector');
+          const occlusionData = await this.page.evaluate((sel: string) => {
+            const el = document.querySelector(sel);
+            if (!el) {
+              return { found: false, isOccluded: false, reason: 'Element not found in DOM' };
+            }
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) {
+              return { found: true, isOccluded: true, reason: 'Element has 0x0 dimensions' };
+            }
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+
+            if (typeof document.elementFromPoint !== 'function') {
+              return { found: true, isOccluded: false, reason: 'document.elementFromPoint not supported' };
+            }
+
+            const topEl = document.elementFromPoint(cx, cy);
+            if (!topEl) {
+              return { found: true, isOccluded: true, reason: 'No element found at target center point' };
+            }
+
+            const isTopOrDescendant = topEl === el || el.contains(topEl);
+            const topTag = topEl.tagName ? topEl.tagName.toLowerCase() : 'unknown';
+            const topId = topEl.id ? `#${topEl.id}` : '';
+            const topClass =
+              topEl.className && typeof topEl.className === 'string'
+                ? `.${topEl.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.')}`
+                : '';
+            const topDesc = `<${topTag}${topId}${topClass}>`;
+
+            return {
+              found: true,
+              isOccluded: !isTopOrDescendant,
+              topElement: topDesc,
+              point: { x: Math.round(cx), y: Math.round(cy) },
+            };
+          }, assertion.target);
+
+          if (!occlusionData.found) {
+            throw new Error(`Element "${assertion.target}" not found for isElementOccluded assertion`);
+          }
+
+          actual = occlusionData.isOccluded;
+          expected = assertion.expected !== undefined ? assertion.expected : false;
+          passed = actual === expected;
+
+          if (!message) {
+            if (actual) {
+              message = `Element "${assertion.target}" is occluded by ${occlusionData.topElement || 'an overlay element'} at (${occlusionData.point?.x}, ${occlusionData.point?.y}).`;
+            } else {
+              message = `Element "${assertion.target}" is not occluded (visible and clickable at top z-index).`;
+            }
+          }
+          break;
+        }
+
+        case 'targetSizeAAA': {
+          if (!assertion.target) throw new Error('targetSizeAAA assertion requires a target selector');
+          const sizeData = await this.page.evaluate((sel: string) => {
+            const el = document.querySelector(sel);
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {
+              width: Math.round(rect.width * 100) / 100,
+              height: Math.round(rect.height * 100) / 100,
+            };
+          }, assertion.target);
+
+          if (!sizeData) {
+            throw new Error(`Element "${assertion.target}" not found for targetSizeAAA assertion`);
+          }
+
+          const meetsAAA = sizeData.width >= 44 && sizeData.height >= 44;
+          actual = `${sizeData.width}x${sizeData.height}px`;
+          expected = '>= 44x44px';
+          passed = meetsAAA;
+
+          if (!message) {
+            message = passed
+              ? `Touch target size for "${assertion.target}" (${actual}) satisfies WCAG 2.2 AAA standard (>= 44x44px).`
+              : `Touch target size for "${assertion.target}" (${actual}) fails WCAG 2.2 AAA standard (requires >= 44x44px).`;
+          }
+          break;
+        }
+
+        case 'noLayoutOverflow': {
+          if (assertion.target) {
+            const overflowData = await this.page.evaluate((sel: string) => {
+              const el = document.querySelector(sel);
+              if (!el) return null;
+              const scrollWidth = el.scrollWidth;
+              const clientWidth = el.clientWidth;
+              return {
+                scrollWidth,
+                clientWidth,
+                hasOverflow: scrollWidth > clientWidth,
+              };
+            }, assertion.target);
+
+            if (!overflowData) {
+              throw new Error(`Element "${assertion.target}" not found for noLayoutOverflow assertion`);
+            }
+
+            passed = !overflowData.hasOverflow;
+            actual = overflowData.hasOverflow
+              ? `scrollWidth (${overflowData.scrollWidth}px) > clientWidth (${overflowData.clientWidth}px)`
+              : 'no overflow';
+            expected = 'no overflow';
+
+            if (!message) {
+              message = passed
+                ? `Element "${assertion.target}" has no layout overflow (scrollWidth <= clientWidth).`
+                : `Element "${assertion.target}" has layout overflow: scrollWidth (${overflowData.scrollWidth}px) exceeds clientWidth (${overflowData.clientWidth}px).`;
+            }
+          } else {
+            const layoutResult = await this.checkLayout();
+            passed = !layoutResult.horizontalOverflow;
+            actual = layoutResult.horizontalOverflow
+              ? `Page scrollWidth (${layoutResult.metrics.scrollWidth}px) > clientWidth (${layoutResult.metrics.clientWidth}px)`
+              : 'no overflow';
+            expected = 'no overflow';
+
+            if (!message) {
+              message = passed
+                ? 'Page has no layout overflow (scrollWidth <= clientWidth).'
+                : `Page has layout overflow: scrollWidth (${layoutResult.metrics.scrollWidth}px) exceeds clientWidth (${layoutResult.metrics.clientWidth}px).`;
+            }
+          }
+          break;
+        }
+
+        case 'noTextTruncation': {
+          if (!assertion.target) {
+            throw new Error('noTextTruncation assertion requires a target selector');
+          }
+          const truncationData = await this.page.evaluate((sel: string) => {
+            const el = document.querySelector(sel);
+            if (!el) return null;
+            const scrollWidth = el.scrollWidth;
+            const clientWidth = el.clientWidth;
+            return {
+              scrollWidth,
+              clientWidth,
+              isTruncated: scrollWidth > clientWidth,
+            };
+          }, assertion.target);
+
+          if (!truncationData) {
+            throw new Error(`Element "${assertion.target}" not found for noTextTruncation assertion`);
+          }
+
+          passed = !truncationData.isTruncated;
+          actual = truncationData.isTruncated
+            ? `scrollWidth (${truncationData.scrollWidth}px) > clientWidth (${truncationData.clientWidth}px)`
+            : 'not truncated';
+          expected = 'not truncated';
+
+          if (!message) {
+            message = passed
+              ? `Element "${assertion.target}" text is not truncated (scrollWidth <= clientWidth).`
+              : `Element "${assertion.target}" text is truncated: scrollWidth (${truncationData.scrollWidth}px) exceeds clientWidth (${truncationData.clientWidth}px).`;
+          }
+          break;
+        }
+
         case 'custom': {
-          if (assertion.target === 'layout' || assertion.metadata?.kind === 'layout') {
+          if (assertion.metadata?.maxScrollWidth !== undefined && assertion.target) {
+            const maxAllowed = Number(assertion.metadata.maxScrollWidth);
+            const measured = await this.page.locator(assertion.target).first().evaluate((el) => {
+              const rect = el.getBoundingClientRect();
+              return Math.max(el.scrollWidth, (el as HTMLElement).offsetWidth || 0, rect.width);
+            });
+            passed = measured <= maxAllowed;
+            expected = `<= ${maxAllowed}px`;
+            actual = `${measured}px`;
+            if (!message) {
+              message = passed
+                ? `Element "${assertion.target}" width (${measured}px) fits within ${maxAllowed}px.`
+                : `Element "${assertion.target}" horizontal overflow: width (${measured}px) exceeds max allowed (${maxAllowed}px).`;
+            }
+          } else if (assertion.target === 'layout' || assertion.metadata?.kind === 'layout') {
             const layoutResult = await this.checkLayout();
             actual = layoutResult;
             expected = { hasIssues: false };
@@ -792,7 +1257,7 @@ export class WebAdapter implements PlatformAdapter {
     switch (normalizedType) {
       case 'DOM_SNAPSHOT': {
         const html = await this.page.content();
-        buffer = Buffer.from(html, 'utf-8');
+        buffer = Buffer.from(redactSecrets(html), 'utf-8');
         mimeType = 'text/html';
         ext = 'html';
         break;
@@ -803,7 +1268,7 @@ export class WebAdapter implements PlatformAdapter {
           errors: this.consoleErrors,
           all: this.consoleLogs,
         };
-        buffer = Buffer.from(JSON.stringify(logData, null, 2), 'utf-8');
+        buffer = Buffer.from(redactSecrets(JSON.stringify(logData, null, 2)), 'utf-8');
         mimeType = 'application/json';
         ext = 'json';
         break;
@@ -814,7 +1279,7 @@ export class WebAdapter implements PlatformAdapter {
           failures: this.networkFailures,
           requests: this.networkRequests,
         };
-        buffer = Buffer.from(JSON.stringify(netData, null, 2), 'utf-8');
+        buffer = Buffer.from(redactSecrets(JSON.stringify(netData, null, 2)), 'utf-8');
         mimeType = 'application/json';
         ext = 'json';
         break;
@@ -900,6 +1365,27 @@ export class WebAdapter implements PlatformAdapter {
         }
       }
     }
+  }
+
+  private isReactHydrationError(entry: ConsoleEntry): boolean {
+    const text = entry.text;
+    if (
+      /Hydration failed/i.test(text) ||
+      /Minified React error #(?:418|423|425|426)\b/i.test(text) ||
+      /#(?:418|423|425|426)\b/.test(text) ||
+      /Text content did not match/i.test(text) ||
+      /hydration mismatch/i.test(text) ||
+      /error while hydrating/i.test(text)
+    ) {
+      return true;
+    }
+    if (
+      (entry.type === 'error' || entry.type === 'pageerror' || entry.type === 'warning' || entry.type === 'warn') &&
+      (/hydration/i.test(text) || /did not match/i.test(text))
+    ) {
+      return true;
+    }
+    return false;
   }
 
   // Diagnostics and inspection helpers

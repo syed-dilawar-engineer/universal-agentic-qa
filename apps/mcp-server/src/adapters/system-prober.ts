@@ -1,4 +1,7 @@
 import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { CapabilityDescriptor, Platform } from '@agentic-qa/schemas';
 
 function isBinaryAvailable(binaryName: string): boolean {
@@ -11,16 +14,40 @@ function isBinaryAvailable(binaryName: string): boolean {
   }
 }
 
+function isChromeOnMac(): boolean {
+  if (process.platform !== 'darwin') return false;
+  return (
+    fs.existsSync('/Applications/Google Chrome.app') ||
+    fs.existsSync(path.join(os.homedir(), 'Applications/Google Chrome.app'))
+  );
+}
+
+function hasPlaywrightCache(): boolean {
+  try {
+    const cacheDir =
+      process.platform === 'darwin'
+        ? path.join(os.homedir(), 'Library/Caches/ms-playwright')
+        : path.join(os.homedir(), '.cache/ms-playwright');
+    if (fs.existsSync(cacheDir)) {
+      const files = fs.readdirSync(cacheDir);
+      return files.some((f) => f.includes('chromium') || f.includes('firefox') || f.includes('webkit'));
+    }
+  } catch {
+    // Ignore error
+  }
+  return false;
+}
+
 export function probeSystemCapabilities(): CapabilityDescriptor[] {
   const descriptors: CapabilityDescriptor[] = [];
 
   // 1. Web Platform
   const hasChromium = isBinaryAvailable('chromium');
-  const hasChrome = isBinaryAvailable('google-chrome') || isBinaryAvailable('chrome');
-  const hasPlaywright = isBinaryAvailable('playwright');
+  const hasChrome = isBinaryAvailable('google-chrome') || isBinaryAvailable('chrome') || isChromeOnMac();
+  const hasPlaywright = isBinaryAvailable('playwright') || hasPlaywrightCache();
   const webTools = ['chromium', 'google-chrome', 'playwright'];
   const missingWebTools: string[] = [];
-  if (!hasChromium) missingWebTools.push('chromium');
+  if (!hasChromium && !hasChrome) missingWebTools.push('chromium');
   if (!hasChrome) missingWebTools.push('google-chrome');
   if (!hasPlaywright) missingWebTools.push('playwright');
 

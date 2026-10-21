@@ -288,7 +288,7 @@ export class AndroidAdapter implements PlatformAdapter, MobileLifecycleActions {
     const start = Date.now();
 
     try {
-      switch (action.type) {
+      switch (action.type as string) {
         case 'tap':
         case 'click': {
           let x: number | undefined;
@@ -563,8 +563,288 @@ export class AndroidAdapter implements PlatformAdapter, MobileLifecycleActions {
           };
         }
 
+        case 'pasteText': {
+          if (action.target) {
+            const tapRes = await this.executeAction({
+              type: 'tap',
+              target: action.target,
+              timeoutMs: action.timeoutMs,
+              metadata: {},
+            });
+            if (!tapRes.success) {
+              return tapRes;
+            }
+          }
+
+          const textToPaste = String(action.value ?? '');
+          // Modern Android: try setting clipboard via cmd clipboard set text
+          const clipRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'cmd',
+            'clipboard',
+            'set',
+            'text',
+            textToPaste,
+          ]);
+
+          if (clipRes.exitCode === 0) {
+            // Trigger paste keyevent (279: KEYCODE_PASTE)
+            const pasteKeyRes = await this.executor.exec('adb', [
+              ...this.getDeviceFlag(),
+              'shell',
+              'input',
+              'keyevent',
+              '279',
+            ]);
+            return {
+              success: pasteKeyRes.exitCode === 0,
+              durationMs: Date.now() - start,
+              output: { pastedLength: textToPaste.length, method: 'clipboard_cmd' },
+              error: pasteKeyRes.exitCode !== 0 ? pasteKeyRes.stderr : undefined,
+            };
+          }
+
+          // Fallback: escape and send via input text
+          const formattedText = escapeAdbInputText(textToPaste);
+          const typeRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'input',
+            'text',
+            formattedText,
+          ]);
+
+          return {
+            success: typeRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { pastedLength: textToPaste.length, method: 'input_text_fallback' },
+            error: typeRes.exitCode !== 0 ? typeRes.stderr : undefined,
+          };
+        }
+
+        case 'deviceRotate': {
+          const mode = String(action.value || 'landscape').toLowerCase();
+          const targetRotation = (mode === 'portrait' || mode === '0') ? '0' : '1';
+
+          // Disable auto-rotate
+          await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'settings',
+            'put',
+            'system',
+            'accelerometer_rotation',
+            '0',
+          ]);
+
+          // Set user rotation (0 = portrait, 1 = landscape)
+          const rotRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'settings',
+            'put',
+            'system',
+            'user_rotation',
+            targetRotation,
+          ]);
+
+          return {
+            success: rotRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { targetRotation: targetRotation === '1' ? 'LANDSCAPE' : 'PORTRAIT' },
+            error: rotRes.exitCode !== 0 ? rotRes.stderr : undefined,
+          };
+        }
+
+        case 'triggerProcessDeath': {
+          const targetPkg =
+            action.target ||
+            (typeof action.value === 'string' ? action.value : action.value?.packageName) ||
+            this.packageName;
+
+          if (!targetPkg) {
+            return {
+              success: false,
+              durationMs: Date.now() - start,
+              error: 'triggerProcessDeath requires a target packageName',
+            };
+          }
+
+          // True Android Low Memory Killer (LMK) simulation:
+          // Before calling am kill, send app to background first via Home key (keyevent 3)
+          // because Android ActivityManagerService ignores `am kill` on foreground apps.
+          await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'input',
+            'keyevent',
+            '3',
+          ]);
+
+          const killRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'am',
+            'kill',
+            targetPkg,
+          ]);
+
+          return {
+            success: killRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { packageKilled: targetPkg, mechanism: 'am kill (LMK simulation)' },
+            error: killRes.exitCode !== 0 ? killRes.stderr : undefined,
+          };
+        }
+
+        case 'simulateNetwork': {
+          const networkState = String(action.value || 'offline').toLowerCase();
+          let cmdArgs: string[] = [];
+
+          if (networkState === 'offline' || networkState === 'airplane_on') {
+            cmdArgs = ['cmd', 'connectivity', 'airplane-mode', 'enable'];
+          } else if (networkState === 'online' || networkState === 'airplane_off') {
+            cmdArgs = ['cmd', 'connectivity', 'airplane-mode', 'disable'];
+          } else if (networkState === 'wifi_off') {
+            cmdArgs = ['svc', 'wifi', 'disable'];
+          } else if (networkState === 'wifi_on') {
+            cmdArgs = ['svc', 'wifi', 'enable'];
+          } else if (networkState === 'data_off') {
+            cmdArgs = ['svc', 'data', 'disable'];
+          } else if (networkState === 'data_on') {
+            cmdArgs = ['svc', 'data', 'enable'];
+          } else {
+            cmdArgs = ['cmd', 'connectivity', 'airplane-mode', 'enable'];
+          }
+
+          const netRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            ...cmdArgs,
+          ]);
+
+          return {
+            success: netRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { networkState, command: cmdArgs.join(' ') },
+            error: netRes.exitCode !== 0 ? netRes.stderr : undefined,
+          };
+        }
+
+        case 'revokePermission': {
+          const targetPkg = (typeof action.value === 'object' && action.value?.packageName) || this.packageName;
+          const permission = action.target || (typeof action.value === 'string' ? action.value : action.value?.permission);
+          if (!targetPkg || !permission) {
+            return {
+              success: false,
+              durationMs: Date.now() - start,
+              error: 'revokePermission requires both a target package and permission string',
+            };
+          }
+
+          const revokeRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'pm',
+            'revoke',
+            targetPkg,
+            permission,
+          ]);
+
+          return {
+            success: revokeRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { package: targetPkg, revokedPermission: permission },
+            error: revokeRes.exitCode !== 0 ? revokeRes.stderr : undefined,
+          };
+        }
+
+        case 'darkMode':
+        case 'setDarkMode': {
+          const isNight =
+            action.value === true ||
+            action.value === 'yes' ||
+            action.value === 'true' ||
+            action.value === 'on' ||
+            action.value?.enabled === true ||
+            action.target === 'yes' ||
+            action.target === 'true' ||
+            action.target === 'on';
+          const mode = isNight ? 'yes' : 'no';
+          const modeRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'cmd',
+            'uimode',
+            'night',
+            mode,
+          ]);
+
+          return {
+            success: modeRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { darkMode: isNight, mode },
+            error: modeRes.exitCode !== 0 ? modeRes.stderr : undefined,
+          };
+        }
+
+        case 'setLocale':
+        case 'locale': {
+          const locale = String(
+            action.value?.locale || action.value || action.target || 'en-US'
+          );
+          const localeRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'cmd',
+            'locale',
+            'set-locales',
+            locale,
+          ]);
+
+          return {
+            success: localeRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { locale },
+            error: localeRes.exitCode !== 0 ? localeRes.stderr : undefined,
+          };
+        }
+
+        case 'fontScale':
+        case 'setFontScale': {
+          const scale = String(
+            action.value?.scale || action.value || action.target || '1.0'
+          );
+          const fontRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'settings',
+            'put',
+            'system',
+            'font_scale',
+            scale,
+          ]);
+
+          return {
+            success: fontRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { fontScale: scale },
+            error: fontRes.exitCode !== 0 ? fontRes.stderr : undefined,
+          };
+        }
+
         case 'custom': {
           const customTarget = String(action.target || '');
+          if (customTarget === 'darkMode' || customTarget === 'setDarkMode') {
+            return this.executeAction({ ...action, type: 'darkMode' as any });
+          }
+          if (customTarget === 'setLocale' || customTarget === 'locale') {
+            return this.executeAction({ ...action, type: 'setLocale' as any });
+          }
+          if (customTarget === 'fontScale' || customTarget === 'setFontScale') {
+            return this.executeAction({ ...action, type: 'fontScale' as any });
+          }
           if (customTarget === 'app:launch') {
             await this.launchApp(action.value?.packageName, action.value?.activityName);
             return { success: true, durationMs: Date.now() - start };
@@ -708,6 +988,168 @@ export class AndroidAdapter implements PlatformAdapter, MobileLifecycleActions {
             message: isEnabled
               ? `Element '${assertion.target}' is enabled`
               : `Element '${assertion.target}' is disabled or was not found`,
+          };
+        }
+
+        case 'consoleClean': {
+          const crashRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'logcat',
+            '-d',
+            '-b',
+            'crash',
+          ]);
+          const crashOutput = crashRes.stdout || '';
+          const hasCrash =
+            crashOutput.includes('FATAL EXCEPTION') ||
+            crashOutput.includes('ANR in') ||
+            crashOutput.includes('SIGSEGV') ||
+            crashOutput.includes('Process died');
+
+          return {
+            passed: !hasCrash,
+            expected: 'Zero fatal Android crashes or ANRs in logcat buffer',
+            actual: hasCrash ? crashOutput.slice(0, 300) : 'Clean logcat buffer',
+            durationMs: Date.now() - start,
+            message: hasCrash
+              ? `Fatal Android application crash/ANR detected: ${crashOutput.slice(0, 200)}`
+              : 'Android logcat crash buffer is clean',
+          };
+        }
+
+        case 'noLayoutOverflow': {
+          const xml = await this.getUIHierarchyXml();
+          const elements = parseUIHierarchy(xml);
+          const wmRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'wm',
+            'size',
+          ]);
+          let screenWidth = 1080;
+          const match = wmRes.stdout.match(/Physical size:\s*(\d+)x(\d+)/i);
+          if (match) {
+            screenWidth = parseInt(match[1], 10);
+          }
+
+          const overflowing = elements.filter(
+            (el) =>
+              el.bounds &&
+              el.bounds.right > screenWidth + 5 &&
+              !el.className?.includes('ScrollView') &&
+              !el.className?.includes('RecyclerView')
+          );
+
+          const passed = overflowing.length === 0;
+          return {
+            passed,
+            expected: `All UI elements within ${screenWidth}px width`,
+            actual: passed ? 'No overflowing elements' : `${overflowing.length} element(s) exceed screen width`,
+            durationMs: Date.now() - start,
+            message: passed
+              ? `No UI horizontal layout overflow detected (screen width ${screenWidth}px)`
+              : `Layout overflow detected: ${overflowing.length} element(s) extend beyond screen width ${screenWidth}px`,
+          };
+        }
+
+        case 'isElementOccluded': {
+          const imeRes = await this.executor.exec('adb', [
+            ...this.getDeviceFlag(),
+            'shell',
+            'dumpsys',
+            'input_method',
+          ]);
+          const isImeVisible = imeRes.stdout.includes('mInputShown=true');
+          const isExpectedOccluded = Boolean(assertion.expected ?? false);
+
+          if (!element || !element.bounds) {
+            return {
+              passed: !isImeVisible,
+              expected: isExpectedOccluded,
+              actual: isImeVisible,
+              durationMs: Date.now() - start,
+              message: 'Target element not found in UI hierarchy for occlusion check',
+            };
+          }
+
+          let screenHeight = 1920;
+          try {
+            const wmRes = await this.executor.exec('adb', [
+              ...this.getDeviceFlag(),
+              'shell',
+              'wm',
+              'size',
+            ]);
+            if (wmRes.exitCode === 0) {
+              const match =
+                wmRes.stdout.match(/Physical size:\s*(\d+)x(\d+)/i) ||
+                wmRes.stdout.match(/(\d+)x(\d+)/);
+              if (match) {
+                screenHeight = parseInt(match[2], 10);
+              }
+            }
+          } catch {
+            // fallback to default 1920
+          }
+          const estimatedKeyboardTop = screenHeight * 0.55;
+          const isOccludedByKeyboard = isImeVisible && element.bounds.centerY > estimatedKeyboardTop;
+
+          const passed = isOccludedByKeyboard === isExpectedOccluded;
+          return {
+            passed,
+            expected: isExpectedOccluded,
+            actual: isOccludedByKeyboard,
+            durationMs: Date.now() - start,
+            message: isOccludedByKeyboard
+              ? `Element '${assertion.target}' is occluded by the soft keyboard`
+              : `Element '${assertion.target}' is not occluded by the soft keyboard`,
+          };
+        }
+
+        case 'targetSizeAAA': {
+          if (!element || !element.bounds) {
+            return {
+              passed: false,
+              expected: 'At least 44x44 touch target area',
+              actual: 'Element not found',
+              durationMs: Date.now() - start,
+              message: `Target element '${assertion.target}' not found for WCAG touch target check`,
+            };
+          }
+
+          const width = element.bounds.width;
+          const height = element.bounds.height;
+          const minRequired = assertion.metadata?.minSize ?? 44;
+          const passed = width >= minRequired && height >= minRequired;
+
+          return {
+            passed,
+            expected: `>= ${minRequired}x${minRequired}`,
+            actual: `${width}x${height}`,
+            durationMs: Date.now() - start,
+            message: passed
+              ? `Touch target '${assertion.target}' meets AAA target size (${width}x${height} >= ${minRequired}x${minRequired})`
+              : `Touch target '${assertion.target}' violates AAA target size (${width}x${height} < ${minRequired}x${minRequired})`,
+          };
+        }
+
+        case 'noSilentTruncation': {
+          const actualText = element?.text ?? element?.contentDesc ?? '';
+          const expectedLimit = assertion.metadata?.expectedLimit ?? assertion.expected;
+          let passed = true;
+          let message = 'Input length preserved without silent cut';
+
+          if (expectedLimit && typeof expectedLimit === 'number' && actualText.length < expectedLimit) {
+            passed = false;
+            message = `Silent truncation detected: expected ${expectedLimit} characters but field only contains ${actualText.length} characters without notification`;
+          }
+
+          return {
+            passed,
+            expected: expectedLimit,
+            actual: actualText.length,
+            durationMs: Date.now() - start,
+            message,
           };
         }
 

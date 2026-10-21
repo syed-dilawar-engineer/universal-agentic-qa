@@ -38,6 +38,7 @@ export const ActionTypeSchema = z.enum([
   'doubleClick',
   'fill',
   'type',
+  'pasteText',         // High-speed clipboard paste for 5000+ chars without ADB/browser typing hang
   'clear',
   'pressKey',
   'hover',
@@ -45,8 +46,16 @@ export const ActionTypeSchema = z.enum([
   'scroll',
   'wait',
   'snapshot',
-  'rapidClicks',     // for robustness testing
+  'rapidClicks',       // for robustness testing
   'evaluate',
+  'deviceRotate',      // Landscape / Portrait toggle
+  'simulateNetwork',   // Offline, 2G throttling, packet loss
+  'triggerProcessDeath', // True LMK am kill / iOS background termination
+  'revokePermission',  // Mid-session permission revocation
+  'stressInputs',      // Bulk boundary value mutation blast
+  'goBack',
+  'goForward',
+  'reload',
   'custom'
 ]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;
@@ -77,6 +86,12 @@ export const AssertionTypeSchema = z.enum([
   'noNetworkFailures',      // Zero unhandled HTTP 4xx/5xx requests
   'noVisualRegression',     // Screenshot matches baseline within threshold
   'noAccessibilityViolations', // WCAG a11y violations == 0
+  'noLayoutOverflow',       // Viewport horizontal/vertical scroll blowout
+  'isElementOccluded',      // Check if target is covered by virtual keyboard or sticky header
+  'noSilentTruncation',     // Input length preserved without silent cut
+  'targetSizeAAA',          // WCAG 2.2 AAA 44x44 CSS px touch target
+  'noTextTruncation',       // i18n text not clipped with unintended ellipsis
+  'noHydrationMismatch',    // Zero React hydration errors (#418, #423, #425)
   'custom'
 ]);
 export type AssertionType = z.infer<typeof AssertionTypeSchema>;
@@ -194,6 +209,14 @@ export const FixVerificationStatusSchema = z.enum([
 ]);
 export type FixVerificationStatus = z.infer<typeof FixVerificationStatusSchema>;
 
+export const RootCauseHypothesisSchema = z.object({
+  summary: z.string(),
+  suspectedComponent: z.string().optional(),
+  theoreticalFlawType: z.string().optional(), // 'ASYNC_RACE_CONDITION', 'STALE_CLOSURE', 'IDEMPOTENCY_VIOLATION', 'LAYOUT_OVERFLOW', etc.
+  suggestedFix: z.string().optional(),
+});
+export type RootCauseHypothesis = z.infer<typeof RootCauseHypothesisSchema>;
+
 export const FindingSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -207,6 +230,9 @@ export const FindingSchema = z.object({
   reproductionSteps: z.array(z.string()),
   expectedBehavior: z.string(),
   actualBehavior: z.string(),
+  rootCauseHypothesis: RootCauseHypothesisSchema.optional(),
+  reproducibilityClassification: z.enum(['BOHRBUG', 'HEISENBUG', 'RACE_CONDITION', 'MANDELBUG']).optional(),
+  flakinessScore: z.number().min(0).max(100).optional(),
   evidenceIds: z.array(z.string()).default([]),
   reproducibilityCount: z.number().default(1),
   reproducibilitySuccessRate: z.number().min(0).max(1).default(1.0),

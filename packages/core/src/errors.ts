@@ -44,3 +44,22 @@ export class QAAdapterError extends QAError {
     this.name = 'QAAdapterError';
   }
 }
+
+export class QACircuitBreakerError extends QAError {
+  constructor(
+    message: string,
+    public readonly limitName: string,
+    public readonly limitValue: number,
+    details?: any
+  ) {
+    super(message, 'QA_CIRCUIT_BREAKER_TRIPPED', details);
+    this.name = 'QACircuitBreakerError';
+  }
+}
+
+export class QASecurityError extends QAError {
+  constructor(message: string, public readonly target: string, details?: any) {
+    super(message, 'QA_SECURITY_BLOCKED', details);
+    this.name = 'QASecurityError';
+  }
+}

@@ -136,14 +136,24 @@ Every platform adapter must truthfully report its runtime capability state:
 
 ## 4. Trust Score Calculation
 
-Every execution produces a deterministic **Trust Score (0–100)**:
+Every execution produces a deterministic **Trust Score (0–100)** calculated by the centralized `TrustScorer` engine:
 
-$$\text{TrustScore} = \text{PassRate} \times 70 + (\text{HasEvidence} ? 30 : 0) - \text{HonestyPenalty}$$
+$$\text{TrustScore} = \max\left(0, \min\left(100, \text{RawScore} - \text{HonestyPenalty}\right)\right)$$
 
 Where:
-- **Pass Rate Component (0–70)**: Ratio of passing tests to total tests.
-- **Evidence Verification Component (0 or 30)**: Rewards runs that generate cryptographically verifiable evidence artifacts (screenshots, DOM snapshots).
-- **Honesty Penalty**: Deductions incurred if an adapter claims assertion passes without verifiable underlying checks.
+$$\text{RawScore} = W_{\text{assertions}} \cdot S_{\text{assertions}} + W_{\text{evidence}} \cdot S_{\text{evidence}} + W_{\text{repro}} \cdot S_{\text{repro}} + W_{\text{coverage}} \cdot S_{\text{coverage}}$$
+
+Default Component Weights:
+- **Assertions Weight ($W_{\text{assertions}} = 0.35$)**: Evaluates assertion density and deterministic quality, strictly scaled by test pass rate.
+- **Evidence Weight ($W_{\text{evidence}} = 0.25$)**: Rewards cryptographic evidence backing without allowing failure artifacts to artificially elevate a failing run above a clean passing run.
+- **Reproducibility Weight ($W_{\text{repro}} = 0.20$)**: Evaluates attempt consistency across retries and defect reproducibility metrics.
+- **Coverage Weight ($W_{\text{coverage}} = 0.20$)**: Ratio of planned scenarios executed to completion.
+
+Honesty Penalties:
+- Unverified assertions claim without backing check: `-15` pts
+- Missing visual baseline: `-20` pts
+- Confirmed finding without cryptographic evidence: `-25` pts
+- Blocked runs due to missing tools/infrastructure: score is forced to `0`.
 
 ---
 

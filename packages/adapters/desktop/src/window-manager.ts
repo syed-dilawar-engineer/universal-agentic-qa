@@ -16,6 +16,8 @@ export class WindowManager {
   private currentBounds: WindowBounds = { x: 0, y: 0, width: 1280, height: 800 };
   private processLogs: string[] = [];
   private isClosed = false;
+  private isMinimized = false;
+  private isFocused = false;
 
   constructor(options?: {
     appName?: string;
@@ -179,7 +181,19 @@ export class WindowManager {
     } else if (this.platform === 'linux') {
       await this.commandExecutor('wmctrl', ['-r', this.appName, '-e', `0,-1,-1,${width},${height}`]);
     } else if (this.platform === 'win32') {
-      const psScript = `(Get-Process -Name "${this.appName}" -ErrorAction SilentlyContinue).MainWindowHandle`;
+      const psScript = `
+$sig = @'
+[DllImport("user32.dll", SetLastError = true)]
+public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+[DllImport("user32.dll", SetLastError = true)]
+public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+'@
+$type = Add-Type -MemberDefinition $sig -Name "Win32WinPos" -Namespace "Win32Utils" -PassThru;
+$proc = if (${this.pid ?? 0} -gt 0) { Get-Process -Id ${this.pid} -ErrorAction SilentlyContinue } else { Get-Process -Name "${this.appName}" -ErrorAction SilentlyContinue | Select-Object -First 1 };
+if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+  [Win32Utils.Win32WinPos]::SetWindowPos($proc.MainWindowHandle, [IntPtr]::Zero, 0, 0, ${width}, ${height}, 0x0040);
+}
+`.trim().replace(/\n/g, ' ');
       await this.commandExecutor('powershell', ['-Command', psScript]);
     }
 
@@ -192,6 +206,8 @@ export class WindowManager {
 
     if (this.cdpClient && this.cdpClient.isConnected()) {
       await this.cdpClient.focusWindow();
+      this.isFocused = true;
+      this.isMinimized = false;
       return;
     }
 
@@ -206,6 +222,121 @@ export class WindowManager {
         `$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('${target}')`,
       ]);
     }
+
+    this.isFocused = true;
+    this.isMinimized = false;
+  }
+
+  async minimize(windowTitle?: string): Promise<void> {
+    const target = windowTitle || this.appName;
+
+    if (this.cdpClient && this.cdpClient.isConnected()) {
+      if ('setWindowBounds' in this.cdpClient) {
+        await this.cdpClient.setWindowBounds({
+          width: this.currentBounds.width,
+          height: this.currentBounds.height,
+        });
+      }
+      this.isMinimized = true;
+      this.isFocused = false;
+      return;
+    }
+
+    if (this.platform === 'darwin') {
+      const script = `tell application "System Events" to tell process "${target}" to set miniaturized of window 1 to true`;
+      await this.commandExecutor('osascript', ['-e', script]);
+    } else if (this.platform === 'linux') {
+      await this.commandExecutor('wmctrl', ['-r', target, '-b', 'add,hidden']);
+    } else if (this.platform === 'win32') {
+      const psScript = `
+$sig = @'
+[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+'@
+$type = Add-Type -MemberDefinition $sig -Name "Win32Min" -Namespace "Win32Utils" -PassThru;
+$proc = if (${this.pid ?? 0} -gt 0) { Get-Process -Id ${this.pid} -ErrorAction SilentlyContinue } else { Get-Process -Name "${target}" -ErrorAction SilentlyContinue | Select-Object -First 1 };
+if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+  [Win32Utils.Win32Min]::ShowWindowAsync($proc.MainWindowHandle, 6);
+}
+`.trim().replace(/\n/g, ' ');
+      await this.commandExecutor('powershell', ['-Command', psScript]);
+    }
+
+    this.isMinimized = true;
+    this.isFocused = false;
+  }
+
+  async restore(windowTitle?: string): Promise<void> {
+    const target = windowTitle || this.appName;
+
+    if (this.cdpClient && this.cdpClient.isConnected()) {
+      await this.cdpClient.focusWindow();
+      this.isMinimized = false;
+      this.isFocused = true;
+      return;
+    }
+
+    if (this.platform === 'darwin') {
+      const script = `tell application "System Events" to tell process "${target}" to set miniaturized of window 1 to false`;
+      await this.commandExecutor('osascript', ['-e', script]);
+      await this.commandExecutor('osascript', ['-e', `tell application "${target}" to activate`]);
+    } else if (this.platform === 'linux') {
+      await this.commandExecutor('wmctrl', ['-r', target, '-b', 'remove,hidden']);
+      await this.commandExecutor('wmctrl', ['-a', target]);
+    } else if (this.platform === 'win32') {
+      const psScript = `
+$sig = @'
+[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+'@
+$type = Add-Type -MemberDefinition $sig -Name "Win32Rest" -Namespace "Win32Utils" -PassThru;
+$proc = if (${this.pid ?? 0} -gt 0) { Get-Process -Id ${this.pid} -ErrorAction SilentlyContinue } else { Get-Process -Name "${target}" -ErrorAction SilentlyContinue | Select-Object -First 1 };
+if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+  [Win32Utils.Win32Rest]::ShowWindowAsync($proc.MainWindowHandle, 9);
+}
+`.trim().replace(/\n/g, ' ');
+      await this.commandExecutor('powershell', ['-Command', psScript]);
+    }
+
+    this.isMinimized = false;
+    this.isFocused = true;
+  }
+
+  async blur(): Promise<void> {
+    if (this.cdpClient && this.cdpClient.isConnected()) {
+      try {
+        await this.cdpClient.evaluate(
+          'window.dispatchEvent(new Event("blur")); if (document.activeElement && document.activeElement.blur) document.activeElement.blur();'
+        );
+      } catch {
+        // Ignore evaluation errors
+      }
+      this.isFocused = false;
+      return;
+    }
+
+    if (this.platform === 'darwin') {
+      const script = `tell application "System Events" to set visible of process "${this.appName}" to false`;
+      const res = await this.commandExecutor('osascript', ['-e', script]);
+      if (res.exitCode !== 0) {
+        await this.commandExecutor('osascript', ['-e', 'tell application "Finder" to activate']);
+      }
+    } else if (this.platform === 'linux') {
+      await this.commandExecutor('wmctrl', ['-k', 'on']);
+    } else if (this.platform === 'win32') {
+      await this.commandExecutor('powershell', [
+        '-Command',
+        `$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('explorer')`,
+      ]);
+    }
+
+    this.isFocused = false;
+  }
+
+  getIsMinimized(): boolean {
+    return this.isMinimized;
+  }
+
+  getIsFocused(): boolean {
+    return this.isFocused;
   }
 
   async close(windowTitle?: string): Promise<void> {
@@ -223,10 +354,11 @@ export class WindowManager {
     } else if (this.platform === 'linux') {
       await this.commandExecutor('wmctrl', ['-c', target]);
     } else if (this.platform === 'win32') {
-      await this.commandExecutor('powershell', [
-        '-Command',
-        `Stop-Process -Name "${target}" -Force -ErrorAction SilentlyContinue`,
-      ]);
+      const psScript =
+        this.pid && this.pid > 0
+          ? `Stop-Process -Id ${this.pid} -Force -ErrorAction SilentlyContinue`
+          : `Get-Process -Name "${target}" -ErrorAction SilentlyContinue | Select-Object -First 1 | Stop-Process -Force -ErrorAction SilentlyContinue`;
+      await this.commandExecutor('powershell', ['-Command', psScript]);
     }
 
     if (this.childProcess && !this.childProcess.killed) {

@@ -64,6 +64,98 @@ function createMockPlaywrightEnvironment() {
     },
   };
 
+  const domElements: Record<string, any> = {
+    '#submit-btn': {
+      tagName: 'BUTTON',
+      id: 'submit-btn',
+      className: 'btn primary',
+      textContent: 'Submit',
+      scrollWidth: 80,
+      clientWidth: 80,
+      getAttribute: (attr: string) => (attr === 'aria-label' ? 'Submit Form' : null),
+      getBoundingClientRect: () => ({ width: 48, height: 48, left: 100, top: 100, right: 148, bottom: 148 }),
+      querySelector: () => null,
+      contains: (el: any) => el === domElements['#submit-btn'],
+    },
+    '#small-btn': {
+      tagName: 'BUTTON',
+      id: 'small-btn',
+      textContent: 'Small',
+      scrollWidth: 24,
+      clientWidth: 24,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 24, height: 24, left: 200, top: 100, right: 224, bottom: 124 }),
+      querySelector: () => null,
+      contains: (el: any) => el === domElements['#small-btn'],
+    },
+    '#occluded-btn': {
+      tagName: 'BUTTON',
+      id: 'occluded-btn',
+      textContent: 'Covered',
+      scrollWidth: 60,
+      clientWidth: 60,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 60, height: 48, left: 100, top: 100, right: 160, bottom: 148 }),
+      querySelector: () => null,
+      contains: () => false,
+    },
+    '#overflow-div': {
+      tagName: 'DIV',
+      id: 'overflow-div',
+      textContent: 'Overflow content',
+      scrollWidth: 500,
+      clientWidth: 200,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 200, height: 50, left: 0, top: 0, right: 200, bottom: 50 }),
+      querySelector: () => null,
+      contains: () => true,
+    },
+    '#clean-div': {
+      tagName: 'DIV',
+      id: 'clean-div',
+      textContent: 'Clean content',
+      scrollWidth: 200,
+      clientWidth: 200,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 200, height: 50, left: 0, top: 0, right: 200, bottom: 50 }),
+      querySelector: () => null,
+      contains: () => true,
+    },
+    '#truncated-text': {
+      tagName: 'SPAN',
+      id: 'truncated-text',
+      textContent: 'Long text overflowing client bounds',
+      scrollWidth: 450,
+      clientWidth: 150,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 150, height: 20, left: 0, top: 0, right: 150, bottom: 20 }),
+      querySelector: () => null,
+      contains: () => true,
+    },
+    '#clean-text': {
+      tagName: 'SPAN',
+      id: 'clean-text',
+      textContent: 'Short text fits',
+      scrollWidth: 80,
+      clientWidth: 100,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 100, height: 20, left: 0, top: 0, right: 100, bottom: 20 }),
+      querySelector: () => null,
+      contains: () => true,
+    },
+    '#inaccessible-btn': {
+      tagName: 'BUTTON',
+      id: 'inaccessible-btn',
+      textContent: '',
+      scrollWidth: 40,
+      clientWidth: 40,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 44, height: 44, left: 0, top: 0, right: 44, bottom: 44 }),
+      querySelector: () => null,
+      contains: () => true,
+    },
+  };
+
   const mockPage: any = {
     on: (event: string, listener: (...args: any[]) => void) => {
       pageEmitter.on(event, listener);
@@ -137,7 +229,7 @@ function createMockPlaywrightEnvironment() {
     evaluate: async (fn: any, arg?: any) => {
       if (typeof fn === 'function') {
         const fnStr = fn.toString();
-        if (fnStr.includes('hasHorizontalOverflow') || fnStr.includes('scrollWidth > clientWidth')) {
+        if (fnStr.includes('issues: LayoutIssue[]') || (fnStr.includes('hasHorizontalOverflow') && !arg)) {
           return layoutResultMock;
         }
         const prevWindow = (globalThis as any).window;
@@ -147,10 +239,25 @@ function createMockPlaywrightEnvironment() {
           scrollTo: () => {},
           innerWidth: 1440,
           innerHeight: 900,
+          getComputedStyle: () => ({ display: 'block', visibility: 'visible', textOverflow: 'ellipsis' }),
         };
         (globalThis as any).document = {
           body: { scrollHeight: 2000, scrollWidth: 1440 },
           documentElement: { clientWidth: 1440, scrollWidth: 1440 },
+          querySelector: (sel: string) => domElements[sel] || null,
+          querySelectorAll: (sel: string) => {
+            if (sel.includes('img:not([alt])')) return [];
+            if (sel.includes('button')) return [domElements['#submit-btn']];
+            if (sel.includes('a[href]')) return [];
+            if (sel.includes('input')) return [];
+            return Object.values(domElements);
+          },
+          elementFromPoint: (x: number, y: number) => {
+            if (x === 130 && y === 124) {
+              return { tagName: 'DIV', id: 'sticky-header', className: 'overlay', contains: () => false };
+            }
+            return domElements['#submit-btn'];
+          },
         };
         try {
           return fn(arg);
@@ -203,6 +310,9 @@ function createMockPlaywrightEnvironment() {
     mouse: {
       wheel: async (dx: number, dy: number) => {},
     },
+    goBack: async (options?: any) => ({ status: () => 200, statusText: () => 'OK' }),
+    goForward: async (options?: any) => ({ status: () => 200, statusText: () => 'OK' }),
+    reload: async (options?: any) => ({ status: () => 200, statusText: () => 'OK' }),
     close: async () => {
       isPageClosed = true;
     },
@@ -498,6 +608,26 @@ describe('WebAdapter', () => {
       expect(result.output.result).toBe(4);
     });
 
+    it('executes goBack, goForward, and reload actions', async () => {
+      const backRes = await adapter.executeAction(
+        makeAction({ type: 'goBack' })
+      );
+      expect(backRes.success).toBe(true);
+      expect(backRes.output.status).toBe(200);
+
+      const fwdRes = await adapter.executeAction(
+        makeAction({ type: 'goForward' })
+      );
+      expect(fwdRes.success).toBe(true);
+      expect(fwdRes.output.status).toBe(200);
+
+      const reloadRes = await adapter.executeAction(
+        makeAction({ type: 'reload' })
+      );
+      expect(reloadRes.success).toBe(true);
+      expect(reloadRes.output.status).toBe(200);
+    });
+
     it('handles unsupported action type without throwing unhandled rejection', async () => {
       const action: any = {
         type: 'unknown-nonexistent-action',
@@ -735,6 +865,152 @@ describe('WebAdapter', () => {
       expect(afterFailedReq.passed).toBe(false);
       expect(afterFailedReq.actual).toBe(2);
       expect(afterFailedReq.message).toContain('ERR_CONNECTION_REFUSED');
+    });
+
+    it('evaluates noHydrationMismatch detecting React 18/19 hydration errors and dev-mode warnings', async () => {
+      // 1. Initial clean state passes
+      const cleanPass = await adapter.executeAssertion(
+        makeAssertion({ type: 'noHydrationMismatch' })
+      );
+      expect(cleanPass.passed).toBe(true);
+      expect(cleanPass.actual).toBe(0);
+
+      // 2. React 18/19 error #418 via console error
+      mockEnv.mockPage.emit('console', {
+        type: () => 'error',
+        text: () => 'Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for full message or use the non-minified dev environment for full errors and additional helpful warnings.',
+        location: () => ({ url: 'https://example.com/app.js', lineNumber: 42 }),
+      });
+
+      const fail418 = await adapter.executeAssertion(
+        makeAssertion({ type: 'noHydrationMismatch' })
+      );
+      expect(fail418.passed).toBe(false);
+      expect(fail418.actual).toBe(1);
+      expect(fail418.message).toContain('Minified React error #418');
+
+      // 3. Dev-mode React console.warn matching Hydration / did not match
+      mockEnv.mockPage.emit('console', {
+        type: () => 'warning',
+        text: () => 'Warning: Text content did not match. Server: "Welcome" Client: "Welcome Back"',
+        location: () => ({ url: 'https://example.com/app.js', lineNumber: 100 }),
+      });
+
+      const failDevWarn = await adapter.executeAssertion(
+        makeAssertion({ type: 'noHydrationMismatch' })
+      );
+      expect(failDevWarn.passed).toBe(false);
+      expect(failDevWarn.actual).toBe(2);
+
+      // 4. Pageerror with Hydration failed
+      mockEnv.mockPage.emit('pageerror', new Error('Hydration failed because the initial UI does not match what was rendered on the server.'));
+      const failPageError = await adapter.executeAssertion(
+        makeAssertion({ type: 'noHydrationMismatch' })
+      );
+      expect(failPageError.passed).toBe(false);
+      expect(failPageError.actual).toBe(3);
+    });
+
+    it('evaluates isElementOccluded detecting when button is occluded by sticky header or modal', async () => {
+      // Non-occluded button
+      const cleanPass = await adapter.executeAssertion(
+        makeAssertion({ type: 'isElementOccluded', target: '#submit-btn' })
+      );
+      expect(cleanPass.passed).toBe(true);
+      expect(cleanPass.actual).toBe(false);
+
+      // Occluded button covered by sticky-header
+      const occludedFail = await adapter.executeAssertion(
+        makeAssertion({ type: 'isElementOccluded', target: '#occluded-btn' })
+      );
+      expect(occludedFail.passed).toBe(false);
+      expect(occludedFail.actual).toBe(true);
+      expect(occludedFail.message).toContain('is occluded');
+
+      // When explicitly expecting occlusion
+      const occludedPass = await adapter.executeAssertion(
+        makeAssertion({ type: 'isElementOccluded', target: '#occluded-btn', expected: true })
+      );
+      expect(occludedPass.passed).toBe(true);
+      expect(occludedPass.actual).toBe(true);
+    });
+
+    it('evaluates targetSizeAAA asserting WCAG 2.2 AAA minimum 44x44 touch targets', async () => {
+      // 48x48 button meets AAA
+      const passAAA = await adapter.executeAssertion(
+        makeAssertion({ type: 'targetSizeAAA', target: '#submit-btn' })
+      );
+      expect(passAAA.passed).toBe(true);
+      expect(passAAA.actual).toBe('48x48px');
+
+      // 24x24 button fails AAA
+      const failAAA = await adapter.executeAssertion(
+        makeAssertion({ type: 'targetSizeAAA', target: '#small-btn' })
+      );
+      expect(failAAA.passed).toBe(false);
+      expect(failAAA.actual).toBe('24x24px');
+      expect(failAAA.message).toContain('fails WCAG 2.2 AAA');
+    });
+
+    it('evaluates noLayoutOverflow on target elements and page layout', async () => {
+      // Element with no overflow (scrollWidth <= clientWidth)
+      const passEl = await adapter.executeAssertion(
+        makeAssertion({ type: 'noLayoutOverflow', target: '#clean-div' })
+      );
+      expect(passEl.passed).toBe(true);
+
+      // Element with overflow (scrollWidth > clientWidth)
+      const failEl = await adapter.executeAssertion(
+        makeAssertion({ type: 'noLayoutOverflow', target: '#overflow-div' })
+      );
+      expect(failEl.passed).toBe(false);
+      expect(failEl.actual).toContain('scrollWidth');
+
+      // Page level
+      const pagePass = await adapter.executeAssertion(
+        makeAssertion({ type: 'noLayoutOverflow' })
+      );
+      expect(pagePass.passed).toBe(true);
+    });
+
+    it('evaluates noTextTruncation detecting clipped/ellipsis text content', async () => {
+      // Clean text element (scrollWidth <= clientWidth)
+      const passText = await adapter.executeAssertion(
+        makeAssertion({ type: 'noTextTruncation', target: '#clean-text' })
+      );
+      expect(passText.passed).toBe(true);
+      expect(passText.actual).toBe('not truncated');
+
+      // Truncated text element (scrollWidth > clientWidth)
+      const failText = await adapter.executeAssertion(
+        makeAssertion({ type: 'noTextTruncation', target: '#truncated-text' })
+      );
+      expect(failText.passed).toBe(false);
+      expect(failText.actual).toContain('scrollWidth (450px) > clientWidth (150px)');
+    });
+
+    it('evaluates noAccessibilityViolations for target and full-page inspection', async () => {
+      // Target button with aria-label
+      const passTarget = await adapter.executeAssertion(
+        makeAssertion({ type: 'noAccessibilityViolations', target: '#submit-btn' })
+      );
+      expect(passTarget.passed).toBe(true);
+      expect(passTarget.actual).toBe(true);
+
+      // Target button missing accessible name
+      const failTarget = await adapter.executeAssertion(
+        makeAssertion({ type: 'noAccessibilityViolations', target: '#inaccessible-btn' })
+      );
+      expect(failTarget.passed).toBe(false);
+      expect(failTarget.actual).toBe(false);
+      expect(failTarget.message).toContain('missing accessible name');
+
+      // Page inspection without target
+      const pageInspection = await adapter.executeAssertion(
+        makeAssertion({ type: 'noAccessibilityViolations' })
+      );
+      expect(pageInspection.passed).toBe(true);
+      expect(pageInspection.actual).toBe(0);
     });
   });
 
@@ -1012,7 +1288,7 @@ describe('WebAdapter', () => {
       });
       await adapter.initialize();
 
-      // Simulate a 200 response
+      // Simulate a 200 response for main document
       mockEnv.mockPage.emit('response', {
         status: () => 200,
         statusText: () => 'OK',
@@ -1026,7 +1302,27 @@ describe('WebAdapter', () => {
       expect(passRes.passed).toBe(true);
       expect(passRes.actual).toBe(200);
 
-      // Simulate a 500 response
+      // Simulate a 204 beacon and favicon: status200 should still check main document, not 204 beacon/favicon
+      mockEnv.mockPage.emit('response', {
+        status: () => 204,
+        statusText: () => 'No Content',
+        url: () => 'https://example.com/beacon',
+        request: () => ({ method: () => 'POST' }),
+      });
+      mockEnv.mockPage.emit('response', {
+        status: () => 204,
+        statusText: () => 'No Content',
+        url: () => 'https://example.com/favicon.ico',
+        request: () => ({ method: () => 'GET' }),
+      });
+
+      const beaconPassRes = await adapter.executeAssertion(
+        makeAssertion({ type: 'status200' })
+      );
+      expect(beaconPassRes.passed).toBe(true);
+      expect(beaconPassRes.actual).toBe(200);
+
+      // Simulate a 500 response on an API endpoint
       mockEnv.mockPage.emit('response', {
         status: () => 500,
         statusText: () => 'Internal Server Error',
@@ -1034,8 +1330,9 @@ describe('WebAdapter', () => {
         request: () => ({ method: () => 'POST' }),
       });
 
+      // Target URL matching evaluates status for that specific request
       const failRes = await adapter.executeAssertion(
-        makeAssertion({ type: 'status200' })
+        makeAssertion({ type: 'status200', target: 'https://example.com/api' })
       );
       expect(failRes.passed).toBe(false);
       expect(failRes.actual).toBe(500);

@@ -40,11 +40,23 @@ function resolveVerificationScenario(
     return customTestCase;
   }
 
-  if (originalPlan) {
-    const matched = originalPlan.scenarios.find((s) => s.id === finding.testCaseId);
-    if (matched) {
-      return matched;
+  let matchedScenario: TestCase | undefined;
+  if (finding.metadata?.scenario) {
+    matchedScenario = finding.metadata.scenario as TestCase;
+  } else if (originalPlan) {
+    matchedScenario = originalPlan.scenarios.find((s) => s.id === finding.testCaseId);
+  }
+
+  if (matchedScenario) {
+    const cloned: TestCase = JSON.parse(JSON.stringify(matchedScenario));
+    if (targetAppUrl) {
+      for (const step of cloned.steps) {
+        if (step.action && step.action.type === 'navigate') {
+          step.action.value = targetAppUrl;
+        }
+      }
     }
+    return cloned;
   }
 
   // Defect 1: Race condition

@@ -13,7 +13,11 @@
     "start": "node ./dist/index.js"
   },
   "dependencies": {
+    "@agentic-qa/adapter-desktop": "workspace:*",
+    "@agentic-qa/adapter-mobile": "workspace:*",
+    "@agentic-qa/adapter-web": "workspace:*",
     "@agentic-qa/core": "workspace:*",
+    "@agentic-qa/reporting": "workspace:*",
     "@agentic-qa/schemas": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.6.0",
     "zod": "^3.24.1"
