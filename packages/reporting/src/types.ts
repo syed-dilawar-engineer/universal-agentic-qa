@@ -55,43 +55,6 @@ export interface ArtifactQueryFilter {
   until?: string | Date;
 }
 
-export interface TrustScorerWeights {
-  /** Weight for deterministic assertions (default 0.35) */
-  assertions?: number;
-  /** Weight for evidence backing (default 0.25) */
-  evidence?: number;
-  /** Weight for test/finding reproducibility (default 0.20) */
-  reproducibility?: number;
-  /** Weight for execution coverage (default 0.20) */
-  coverage?: number;
-}
-
-export interface TrustScorerOptions {
-  /** Weights for trust score dimensions (must sum to ~1.0) */
-  weights?: TrustScorerWeights;
-  /** Penalty points deducted per unverified assertion (default 15) */
-  unverifiedAssertionPenalty?: number;
-  /** Penalty points deducted per missing baseline (default 20) */
-  missingBaselinePenalty?: number;
-  /** Penalty points deducted per confirmed finding without evidence (default 25) */
-  unbackedConfirmedFindingPenalty?: number;
-  /** Maximum total honesty penalty deduction (default 100) */
-  maxHonestyPenalty?: number;
-}
-
-export interface TrustScoreInput {
-  testResults: TestCaseResult[];
-  evidence: EvidenceArtifact[];
-  findings?: Finding[];
-  testPlan?: TestPlan;
-  /** Explicit count of unverified assertions (e.g. assertions with no concrete validation) */
-  unverifiedAssertionsCount?: number;
-  /** Explicit count of missing baselines (e.g. visual diff without baseline image) */
-  missingBaselinesCount?: number;
-  /** Explicit count of flaky attempts across runs */
-  flakyAttemptsCount?: number;
-}
-
 export interface MarkdownReportOptions {
   /** Include clickable links to evidence artifacts (default true) */
   includeEvidenceLinks?: boolean;

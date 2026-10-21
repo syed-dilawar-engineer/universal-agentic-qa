@@ -20,6 +20,7 @@ import { loadConfig } from '@agentic-qa/core';
 import { createDefaultRegistry } from '../utils/registry.js';
 import { saveReport, renderReportTerminal } from '../utils/reporter.js';
 import { CliLogger, createTable, pc } from '../output.js';
+import { VisualDiffEngine } from '@agentic-qa/engine-visual';
 
 export interface VisualOptions {
   target?: string;
@@ -152,19 +153,71 @@ export function registerVisualCommand(
         const lifecycle = new RunLifecycle(adapter, plan, capabilities);
         const report = await lifecycle.execute();
 
-        // If update baselines requested, save current screenshots to baseline dir
+        const diffEngine = new VisualDiffEngine({ defaultDiffThreshold: threshold });
+
+        // Ensure screenshot evidence exists for each viewport
+        for (const vp of viewportsList) {
+          const alreadyCaptured = report.evidence.some(
+            (e) => e.type === 'SCREENSHOT' && (e.metadata?.viewport === vp || e.description?.includes(vp))
+          );
+          if (!alreadyCaptured) {
+            try {
+              const shot = await adapter.captureEvidence('SCREENSHOT', `Visual snapshot for ${vp}`);
+              if (shot) {
+                shot.metadata = { ...shot.metadata, viewport: vp };
+                report.evidence.push(shot);
+              }
+            } catch {
+              // Ignore if adapter does not support screenshot capture
+            }
+          }
+        }
+
+        // If update baselines requested, save real screenshots to baseline dir
         if (options.updateBaselines) {
           for (const vp of viewportsList) {
             const baselineFile = path.join(baselineDir, `${vp}.png`);
-            // Write minimal png baseline
-            const minimalPng = Buffer.from(
-              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-              'base64'
-            );
-            fs.writeFileSync(baselineFile, minimalPng);
+            const matchedArtifact = report.evidence.find(
+              (e) => e.type === 'SCREENSHOT' && (e.metadata?.viewport === vp || e.description?.includes(vp))
+            ) || report.evidence.find((e) => e.type === 'SCREENSHOT');
+
+            if (matchedArtifact && fs.existsSync(matchedArtifact.path)) {
+              fs.copyFileSync(matchedArtifact.path, baselineFile);
+            } else {
+              throw new Error(
+                `Missing screenshot artifact for viewport '${vp}'. Expected screenshot file on disk, but found none (${matchedArtifact?.path || 'not captured'}). Cannot update baseline without actual screenshot.`
+              );
+            }
           }
           if (!options.json) {
             logger.log(pc.green(`✔ Baselines successfully updated in ${baselineDir}`));
+          }
+        } else {
+          // Compare captured screenshots with baselines via VisualDiffEngine
+          for (const vp of viewportsList) {
+            const baselineFile = path.join(baselineDir, `${vp}.png`);
+            const matchedArtifact = report.evidence.find(
+              (e) => e.type === 'SCREENSHOT' && (e.metadata?.viewport === vp || e.description?.includes(vp))
+            ) || report.evidence.find((e) => e.type === 'SCREENSHOT');
+
+            if (matchedArtifact && fs.existsSync(matchedArtifact.path)) {
+              const diffPath = path.join(baselineDir, `${vp}-diff.png`);
+              const diffResult = await diffEngine.compareFiles(baselineFile, matchedArtifact.path, {
+                diffThreshold: threshold,
+                outputDiffPath: diffPath,
+                platform,
+              });
+
+              if (!diffResult.passed) {
+                report.overallStatus = 'FAILED';
+                if (diffResult.finding) {
+                  report.findings.push(diffResult.finding);
+                }
+                if (diffResult.evidenceArtifact) {
+                  report.evidence.push(diffResult.evidenceArtifact);
+                }
+              }
+            }
           }
         }
 

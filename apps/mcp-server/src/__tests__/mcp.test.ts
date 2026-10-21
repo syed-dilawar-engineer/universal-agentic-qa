@@ -243,8 +243,8 @@ describe('MCP Tools Unit Tests', () => {
       );
 
       expect(execRes.overallStatus).toBe('PASSED');
-      expect(execRes.summary.totalTests).toBe(1);
-      expect(execRes.summary.passed).toBe(1);
+      expect(execRes.summary.totalTests).toBe(planRes.scenarioCount);
+      expect(execRes.summary.passed).toBe(planRes.scenarioCount);
       expect(execRes.summary.failed).toBe(0);
       expect(execRes.trustScore.score).toBeGreaterThan(0);
       expect(execRes.findingsCount).toBe(0);
@@ -646,6 +646,7 @@ describe('MCP Tools Unit Tests', () => {
       });
 
       expect(res.content[0].text).toContain('[Output truncated from');
+      expect(() => JSON.parse(res.content[0].text)).not.toThrow();
 
       await client.close();
       await server.close();

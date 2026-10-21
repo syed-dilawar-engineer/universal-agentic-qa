@@ -10,7 +10,9 @@ import {
   TrustScore,
 } from '@agentic-qa/schemas';
 import { PlatformAdapter } from './adapter.js';
-import { QABlockedError, QATimeoutError } from './errors.js';
+import { QABlockedError, QATimeoutError, QACircuitBreakerError } from './errors.js';
+import { TrustScorer } from './trust-scorer.js';
+import { redactSecrets, sanitizeObject } from './sanitizer.js';
 
 export interface ExecutionOptions {
   onStepStart?: (stepId: string, desc: string) => void;
@@ -18,6 +20,7 @@ export interface ExecutionOptions {
   onTestCaseStart?: (testCase: TestCase) => void;
   onTestCaseEnd?: (result: TestCaseResult) => void;
   maxDurationMs?: number;
+  maxActionsPerTest?: number;
 }
 
 export class RunLifecycle {
@@ -52,6 +55,14 @@ export class RunLifecycle {
       await this.adapter.initialize();
 
       for (const testCase of this.plan.scenarios) {
+        // Enforce global execution timeout before starting test case
+        if (options.maxDurationMs && Date.now() - this.startTime > options.maxDurationMs) {
+          throw new QATimeoutError(
+            `Execution exceeded maxDurationMs of ${options.maxDurationMs}ms`,
+            options.maxDurationMs
+          );
+        }
+
         options.onTestCaseStart?.(testCase);
         const testCaseResult = await this.executeTestCase(testCase, options);
         this.testResults.push(testCaseResult);
@@ -74,7 +85,25 @@ export class RunLifecycle {
     let testStatus: 'PASSED' | 'FAILED' | 'BLOCKED' | 'SKIPPED' | 'ERROR' = 'PASSED';
     let fatalError: string | undefined;
 
+    const maxActions = options.maxActionsPerTest ?? 1000;
+    let actionCount = 0;
+
     for (const step of testCase.steps) {
+      // 1. Enforce global duration limit during step progression
+      if (options.maxDurationMs && Date.now() - this.startTime > options.maxDurationMs) {
+        fatalError = `Execution exceeded maxDurationMs limit (${options.maxDurationMs}ms)`;
+        testStatus = 'FAILED';
+        break;
+      }
+
+      // 2. Enforce per-test timeout
+      const perTestTimeout = testCase.timeoutMs || 60000;
+      if (Date.now() - testCaseStart > perTestTimeout) {
+        fatalError = `Test case "${testCase.id}" exceeded timeout of ${perTestTimeout}ms`;
+        testStatus = 'FAILED';
+        break;
+      }
+
       options.onStepStart?.(step.id, step.description);
       const stepStart = Date.now();
       let stepStatus: 'PASSED' | 'FAILED' | 'BLOCKED' | 'SKIPPED' = 'PASSED';
@@ -82,21 +111,79 @@ export class RunLifecycle {
       const stepEvidence: string[] = [];
 
       try {
-        // Execute Action if present
+        // Enforce per-test action limit
         if (step.action) {
+          actionCount++;
+          if (actionCount > maxActions) {
+            stepStatus = 'FAILED';
+            stepError = `Action limit exceeded: maxActionsPerTest (${maxActions}) reached on test case "${testCase.id}"`;
+            fatalError = stepError;
+            testStatus = 'FAILED';
+
+            stepResults.push({
+              stepId: step.id,
+              status: stepStatus,
+              durationMs: Date.now() - stepStart,
+              error: stepError,
+              evidenceIds: [],
+            });
+            break;
+          }
+
           const actionResult = await this.adapter.executeAction(step.action);
           if (!actionResult.success) {
             stepStatus = 'FAILED';
-            stepError = actionResult.error || 'Action failed';
+            stepError = actionResult.error ? redactSecrets(actionResult.error) : 'Action failed';
+
+            // Capture automatic failure evidence on action failure
+            try {
+              const failureEv = await this.adapter.captureEvidence(
+                'SCREENSHOT',
+                `Action failure snapshot for step: ${step.id}`
+              );
+              this.evidenceStore.push(failureEv);
+              stepEvidence.push(failureEv.id);
+            } catch {
+              // Ignore snapshot capture errors
+            }
+
+            // Create Finding with reproduction context for action failure
+            const finding: Finding = {
+              id: `FIND-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              title: `Failed action: ${step.action.type}`,
+              description: stepError,
+              severity: 'HIGH',
+              status: 'CONFIRMED',
+              fixVerification: 'UNVERIFIED',
+              platform: this.plan.platform,
+              testCaseId: testCase.id,
+              preconditions: [`Target app: ${this.plan.targetApp}`],
+              reproductionSteps: testCase.steps.map((s) => s.description),
+              expectedBehavior: `Action "${step.action.type}" should execute successfully`,
+              actualBehavior: stepError,
+              evidenceIds: [...stepEvidence],
+              reproducibilityCount: 1,
+              reproducibilitySuccessRate: 1.0,
+              detectedAt: new Date().toISOString(),
+              metadata: {
+                failedStepId: step.id,
+                failedAction: step.action,
+                actionError: actionResult.error,
+                scenario: testCase,
+              },
+            };
+            this.findings.push(finding);
           }
         }
 
-        // Execute Assertion if present
+        // Execute Assertion if present and action succeeded
         if (step.assertion && stepStatus === 'PASSED') {
           const assertionResult = await this.adapter.executeAssertion(step.assertion);
           if (!assertionResult.passed) {
             stepStatus = 'FAILED';
-            stepError = assertionResult.message || 'Assertion failed';
+            stepError = assertionResult.message
+              ? redactSecrets(assertionResult.message)
+              : 'Assertion failed';
 
             // Capture automatic screenshot evidence on assertion failure
             try {
@@ -110,7 +197,7 @@ export class RunLifecycle {
               // Ignore snapshot capture errors
             }
 
-            // Create Finding
+            // Create Finding with complete reproduction context and scenario
             const finding: Finding = {
               id: `FIND-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
               title: `Failed assertion: ${step.assertion.type}`,
@@ -121,21 +208,61 @@ export class RunLifecycle {
               platform: this.plan.platform,
               testCaseId: testCase.id,
               preconditions: [`Target app: ${this.plan.targetApp}`],
-              reproductionSteps: [step.description],
+              reproductionSteps: testCase.steps.map((s) => s.description),
               expectedBehavior: JSON.stringify(step.assertion.expected ?? 'true'),
               actualBehavior: String(assertionResult.actual ?? stepError),
               evidenceIds: [...stepEvidence],
               reproducibilityCount: 1,
               reproducibilitySuccessRate: 1.0,
               detectedAt: new Date().toISOString(),
-              metadata: {},
+              metadata: {
+                failedStepId: step.id,
+                failedAssertion: step.assertion,
+                scenario: testCase,
+              },
             };
             this.findings.push(finding);
           }
         }
       } catch (err: any) {
         stepStatus = 'FAILED';
-        stepError = err.message;
+        stepError = redactSecrets(err.message || String(err));
+
+        try {
+          const failureEv = await this.adapter.captureEvidence(
+            'SCREENSHOT',
+            `Step error snapshot for step: ${step.id}`
+          );
+          this.evidenceStore.push(failureEv);
+          stepEvidence.push(failureEv.id);
+        } catch {
+          // Ignore snapshot capture errors
+        }
+
+        const finding: Finding = {
+          id: `FIND-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          title: `Step execution error: ${step.id}`,
+          description: stepError,
+          severity: 'HIGH',
+          status: 'CONFIRMED',
+          fixVerification: 'UNVERIFIED',
+          platform: this.plan.platform,
+          testCaseId: testCase.id,
+          preconditions: [`Target app: ${this.plan.targetApp}`],
+          reproductionSteps: testCase.steps.map((s) => s.description),
+          expectedBehavior: 'Step should complete without runtime exception',
+          actualBehavior: stepError,
+          evidenceIds: [...stepEvidence],
+          reproducibilityCount: 1,
+          reproducibilitySuccessRate: 1.0,
+          detectedAt: new Date().toISOString(),
+          metadata: {
+            failedStepId: step.id,
+            error: err.message,
+            scenario: testCase,
+          },
+        };
+        this.findings.push(finding);
       }
 
       const stepDuration = Date.now() - stepStart;
@@ -164,7 +291,7 @@ export class RunLifecycle {
       status: testStatus,
       durationMs: Date.now() - testCaseStart,
       stepResults,
-      error: fatalError,
+      error: fatalError ? redactSecrets(fatalError) : undefined,
       evidenceIds: stepResults.flatMap((s) => s.evidenceIds),
       attemptCount: 1,
     };
@@ -185,33 +312,15 @@ export class RunLifecycle {
       overallStatus = 'BLOCKED';
     }
 
-    // Calculate deterministic trust score
-    const deterministicAssertionsCount = this.plan.scenarios.reduce(
-      (acc, s) => acc + s.steps.filter((st) => !!st.assertion).length,
-      0
-    );
-    const evidenceArtifactsCount = this.evidenceStore.length;
-    
-    // Score based on verified assertions and evidence
-    let trustScoreValue = 100;
-    if (totalTests === 0) {
-      trustScoreValue = 0;
-    } else {
-      const passRate = passed / totalTests;
-      trustScoreValue = Math.round(passRate * 70 + (evidenceArtifactsCount > 0 ? 30 : 0));
-    }
+    // Centralized deterministic trust scoring using TrustScorer.compute()
+    const trustScore = TrustScorer.compute({
+      testResults: this.testResults,
+      evidence: this.evidenceStore,
+      findings: this.findings,
+      testPlan: this.plan,
+    });
 
-    const trustScore: TrustScore = {
-      score: trustScoreValue,
-      deterministicAssertionsCount,
-      evidenceArtifactsCount,
-      reproducibilityScore: 100,
-      coverageScore: totalTests > 0 ? 100 : 0,
-      honestyPenalty: 0,
-      summary: `Evaluated ${totalTests} tests with ${deterministicAssertionsCount} deterministic assertions and ${evidenceArtifactsCount} evidence artifacts.`,
-    };
-
-    return {
+    const report: QARunReport = {
       runId: `run-${Date.now()}`,
       projectName: this.plan.name,
       targetApp: this.plan.targetApp,
@@ -239,5 +348,7 @@ export class RunLifecycle {
         nodeVersion: process.version,
       },
     };
+
+    return sanitizeObject(report);
   }
 }

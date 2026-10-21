@@ -77,11 +77,14 @@ export class MonkeyExplorer {
       const stateData = stateMap.get(currentState)!;
 
       // Prioritize unvisited or least-interacted elements in the current state
-      const chosenTarget = this.pickStateGuidedTarget(candidates, stateData, rng);
+      const rawTarget = this.pickStateGuidedTarget(candidates, stateData, rng);
       stateData.elementInteractions.set(
-        chosenTarget,
-        (stateData.elementInteractions.get(chosenTarget) ?? 0) + 1
+        rawTarget,
+        (stateData.elementInteractions.get(rawTarget) ?? 0) + 1
       );
+
+      // Disambiguate generic selectors to prevent Playwright strict mode collisions
+      const chosenTarget = await this.resolveSpecificTarget(rawTarget, rng);
 
       // Choose action type
       const actionType = this.chooseActionType(chosenTarget, allowedActions, rng);
@@ -154,8 +157,9 @@ export class MonkeyExplorer {
       }
 
       // Resolve state after action
+      const stateBefore = currentState;
       const stateAfter = await this.resolveState(options.stateExtractor);
-      if (stateAfter !== currentState) {
+      if (stateAfter !== stateBefore) {
         stateTransitions++;
         currentState = stateAfter;
         this.recordStateVisit(stateMap, currentState);
@@ -163,7 +167,7 @@ export class MonkeyExplorer {
 
       const stepRecord: MonkeyStep = {
         stepNumber: stepCount,
-        stateBefore: stateData ? currentState : 'unknown',
+        stateBefore,
         action: actionSpec,
         stateAfter,
         durationMs: Date.now() - stepStartTime,
@@ -202,20 +206,82 @@ export class MonkeyExplorer {
     }
 
     try {
+      const evalScript = `
+        (() => {
+          const route = (window.location.pathname || '') + (window.location.search || '') + (window.location.hash || '');
+          const hasDialog = !!document.querySelector('[role="dialog"], dialog[open]');
+          const activeTabEl = document.querySelector('[aria-selected="true"]');
+          const activeTab = activeTabEl ? (activeTabEl.getAttribute('id') || activeTabEl.getAttribute('name') || activeTabEl.textContent?.trim().slice(0, 20) || 'active') : 'none';
+          const childCount = document.body ? document.body.childElementCount : 0;
+          const title = document.title || '';
+          
+          const composite = \`\${route}|dialog:\${hasDialog}|tab:\${activeTab}|children:\${childCount}|title:\${title}\`;
+          let hash = 0;
+          for (let i = 0; i < composite.length; i++) {
+            hash = ((hash << 5) - hash + composite.charCodeAt(i)) | 0;
+          }
+          const hashHex = (hash >>> 0).toString(16).padStart(8, '0');
+          return \`\${route || '/'}#state=\${hashHex}[dialog:\${hasDialog},tab:\${activeTab},children:\${childCount}]\`;
+        })()
+      `;
       const evalRes = await this.adapter.executeAction(
         createActionSpec({
           type: 'evaluate',
-          value: 'window.location.pathname + window.location.hash || document.title',
+          value: evalScript,
         })
       );
-      if (evalRes.success && typeof evalRes.output === 'string' && evalRes.output.trim().length > 0) {
-        return evalRes.output;
+      const output = typeof evalRes.output === 'object' && evalRes.output !== null && 'result' in evalRes.output
+        ? evalRes.output.result
+        : evalRes.output;
+
+      if (evalRes.success && typeof output === 'string' && output.trim().length > 0) {
+        return output;
       }
     } catch {
       // Evaluate not supported on this adapter
     }
 
     return 'default-root-state';
+  }
+
+  private async resolveSpecificTarget(
+    target: string,
+    rng: SeededRandom
+  ): Promise<string> {
+    if (target === 'button' || target === 'a' || target === 'input') {
+      try {
+        const evalRes = await this.adapter.executeAction(
+          createActionSpec({
+            type: 'evaluate',
+            value: `(() => {
+              const els = Array.from(document.querySelectorAll(${JSON.stringify(target)}));
+              if (els.length === 0) return null;
+              return els.map((el, idx) => {
+                if (el.id) return '#' + CSS.escape(el.id);
+                const testId = el.getAttribute('data-testid');
+                if (testId) return '[data-testid="' + CSS.escape(testId) + '"]';
+                const name = el.getAttribute('name');
+                if (name) return ${JSON.stringify(target)} + '[name="' + CSS.escape(name) + '"]';
+                const ariaLabel = el.getAttribute('aria-label');
+                if (ariaLabel) return ${JSON.stringify(target)} + '[aria-label="' + CSS.escape(ariaLabel) + '"]';
+                return ${JSON.stringify(target)} + ' >> nth=' + idx;
+              });
+            })()`,
+          })
+        );
+        const output = typeof evalRes.output === 'object' && evalRes.output !== null && 'result' in evalRes.output
+          ? evalRes.output.result
+          : evalRes.output;
+
+        if (Array.isArray(output) && output.length > 0) {
+          return rng.pick(output);
+        }
+      } catch {
+        // Fallback if evaluate is unsupported
+      }
+      return `${target} >> nth=0`;
+    }
+    return target;
   }
 
   private recordStateVisit(stateMap: Map<string, StateVisitData>, state: string): void {

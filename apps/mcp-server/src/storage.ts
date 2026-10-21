@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   QARunReport,
+  QARunReportSchema,
   EvidenceArtifact,
   Finding,
   TestPlan,
@@ -15,7 +16,58 @@ export class RunStorage {
   private plans: Map<string, TestPlan> = new Map();
   private latestRunId: string | null = null;
 
-  constructor(private readonly baseOutputDir: string = '.qa-output') {}
+  constructor(
+    private readonly baseOutputDir: string = '.qa-output',
+    autoLoadFromDisk: boolean = false
+  ) {
+    this.ensureDirs();
+    if (autoLoadFromDisk) {
+      this.loadFromDisk();
+    }
+  }
+
+  private ensureDirs(): void {
+    try {
+      const reportsDir = path.resolve(process.cwd(), this.baseOutputDir, 'reports');
+      fs.mkdirSync(reportsDir, { recursive: true });
+    } catch {
+      // Ignore directory creation error
+    }
+  }
+
+  loadFromDisk(): void {
+    try {
+      const reportsDir = path.resolve(process.cwd(), this.baseOutputDir, 'reports');
+      if (!fs.existsSync(reportsDir)) return;
+
+      const files = fs.readdirSync(reportsDir);
+      for (const file of files) {
+        if (file.endsWith('.json')) {
+          try {
+            const filePath = path.join(reportsDir, file);
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const parsed = JSON.parse(content);
+            const validated = QARunReportSchema.safeParse(parsed);
+            if (validated.success) {
+              const rep = validated.data;
+              this.reports.set(rep.runId, rep);
+              this.latestRunId = rep.runId;
+              for (const finding of rep.findings) {
+                this.findings.set(finding.id, finding);
+              }
+              for (const ev of rep.evidence) {
+                this.evidence.set(ev.id, ev);
+              }
+            }
+          } catch {
+            // Ignore individual corrupted file
+          }
+        }
+      }
+    } catch {
+      // Ignore disk load error
+    }
+  }
 
   // --------------------------------------------------------------------------
   // Reports
@@ -33,6 +85,16 @@ export class RunStorage {
     // Index evidence
     for (const ev of report.evidence) {
       this.evidence.set(ev.id, ev);
+    }
+
+    // Persist to disk
+    try {
+      this.ensureDirs();
+      const reportsDir = path.resolve(process.cwd(), this.baseOutputDir, 'reports');
+      const filePath = path.join(reportsDir, `${report.runId}.json`);
+      fs.writeFileSync(filePath, JSON.stringify(report, null, 2), 'utf-8');
+    } catch (err: any) {
+      // Non-fatal logging for storage write issues
     }
   }
 
@@ -83,11 +145,18 @@ export class RunStorage {
     };
     this.findings.set(findingId, updated);
 
-    // Also update in any report containing it
+    // Also update in any report containing it and persist
     for (const report of this.reports.values()) {
       const idx = report.findings.findIndex((f) => f.id === findingId);
       if (idx !== -1) {
         report.findings[idx] = updated;
+        try {
+          const reportsDir = path.resolve(process.cwd(), this.baseOutputDir, 'reports');
+          const filePath = path.join(reportsDir, `${report.runId}.json`);
+          fs.writeFileSync(filePath, JSON.stringify(report, null, 2), 'utf-8');
+        } catch {
+          // Ignore write error
+        }
       }
     }
 
@@ -143,7 +212,6 @@ export class RunStorage {
       : path.resolve(process.cwd(), artifact.path);
 
     if (!fs.existsSync(resolvedPath)) {
-      // If file is not on disk (e.g., in-memory mock), check metadata
       if (artifact.metadata?.rawContent) {
         const raw = Buffer.from(String(artifact.metadata.rawContent));
         const hash = crypto.createHash('sha256').update(raw).digest('hex');
@@ -151,7 +219,7 @@ export class RunStorage {
         const slice = raw.subarray(0, maxBytes);
         return {
           artifact,
-          verifiedChecksum: hash === artifact.sha256 || artifact.sha256 === 'mock-sha256',
+          verifiedChecksum: hash === artifact.sha256,
           actualSha256: hash,
           data: options.encoding === 'base64' ? slice.toString('base64') : slice.toString('utf8'),
           truncated,
@@ -214,7 +282,7 @@ let defaultStorageInstance: RunStorage | null = null;
 
 export function getDefaultRunStorage(): RunStorage {
   if (!defaultStorageInstance) {
-    defaultStorageInstance = new RunStorage();
+    defaultStorageInstance = new RunStorage('.qa-output', true);
   }
   return defaultStorageInstance;
 }

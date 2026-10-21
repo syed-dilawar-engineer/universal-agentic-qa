@@ -124,7 +124,13 @@ describe('Agentic QA CLI Test Suite', () => {
         getArch: () => 'x64',
       };
 
-      const { exitCode, json } = await runCliCapture(['doctor', '--json'], { envDetector: mockEnv });
+      const mockReg = new CapabilityRegistry();
+      mockReg.registerAdapter(new CliMockAdapter({ id: 'web-mock', platform: 'web', state: 'AVAILABLE' }));
+
+      const { exitCode, json } = await runCliCapture(['doctor', '--json'], {
+        envDetector: mockEnv,
+        registryFactory: () => mockReg,
+      });
       expect(json.ok).toBe(false); // Node 18 is below >= 20 requirement
       const nodeCheck = json.checks.find((c: any) => c.name === 'Node.js');
       expect(nodeCheck.status).toBe('warning');
@@ -138,8 +144,13 @@ describe('Agentic QA CLI Test Suite', () => {
         getPlatform: () => 'linux',
         getArch: () => 'x64',
       };
+      const mockReg = new CapabilityRegistry();
+      mockReg.registerAdapter(new CliMockAdapter({ id: 'web-mock', platform: 'web', state: 'BLOCKED' }));
 
-      const { stdout, json } = await runCliCapture(['doctor', '--json'], { envDetector: mockEnv });
+      const { stdout, json } = await runCliCapture(['doctor', '--json'], {
+        envDetector: mockEnv,
+        registryFactory: () => mockReg,
+      });
       expect(json).toBeDefined();
       const adbCheck = json.checks.find((c: any) => c.name.includes('adb'));
       expect(adbCheck.status).toBe('missing');
@@ -413,6 +424,27 @@ describe('Agentic QA CLI Test Suite', () => {
       expect(fs.existsSync(path.join(baselineDir, 'desktop.png'))).toBe(true);
       expect(fs.existsSync(path.join(baselineDir, 'tablet.png'))).toBe(true);
     });
+
+    it('throws explicit error when updating baselines and screenshot artifact is missing', async () => {
+      class MissingScreenshotAdapter extends CliMockAdapter {
+        async captureEvidence(): Promise<any> {
+          throw new Error('Screenshot capture failed');
+        }
+      }
+      const registry = new CapabilityRegistry();
+      registry.registerAdapter(new MissingScreenshotAdapter({ id: 'web-standard', platform: 'web', state: 'AVAILABLE' }));
+      const baselineDir = path.join(tempDir, 'baselines-missing');
+
+      const { exitCode, stderr, stdout } = await runCliCapture([
+        'visual',
+        'http://localhost:3000',
+        '--baseline-dir', baselineDir,
+        '--update-baselines',
+      ], { registryFactory: () => registry });
+
+      expect(exitCode).toBe(1);
+      expect(stderr + stdout).toContain('Missing screenshot artifact for viewport');
+    });
   });
 
   // ==========================================================================
@@ -514,6 +546,26 @@ describe('Agentic QA CLI Test Suite', () => {
     });
 
     it('outputs FAILED and exit code 1 when fix rerun fails', async () => {
+      const failedFinding: Finding = {
+        id: 'FIND-102',
+        title: 'Broken submit button',
+        description: 'Button throws 500 error',
+        severity: 'HIGH',
+        status: 'CONFIRMED',
+        fixVerification: 'UNVERIFIED',
+        platform: 'web',
+        testCaseId: 'test-1',
+        preconditions: ['User on checkout page'],
+        reproductionSteps: ['Click submit button on checkout page'],
+        expectedBehavior: 'HTTP 200',
+        actualBehavior: 'HTTP 500',
+        evidenceIds: [],
+        reproducibilityCount: 1,
+        reproducibilitySuccessRate: 1.0,
+        detectedAt: new Date().toISOString(),
+        metadata: {},
+      };
+
       const prevReport: QARunReport = {
         runId: 'prev-run-2',
         projectName: 'Still Broken App',
@@ -535,7 +587,7 @@ describe('Agentic QA CLI Test Suite', () => {
           evidenceIds: [],
           attemptCount: 1,
         }],
-        findings: [],
+        findings: [failedFinding],
         evidence: [],
         environmentInfo: {},
       };
@@ -561,6 +613,55 @@ describe('Agentic QA CLI Test Suite', () => {
       expect(exitCode).toBe(1);
       expect(json.status).toBe('FAILED');
       expect(json.verified).toBe(false);
+    });
+
+    it('refuses to certify FIX_VERIFIED on missing scenarios and returns NOT_VERIFIED', async () => {
+      const prevReport: QARunReport = {
+        runId: 'prev-run-3',
+        projectName: 'Unreproducible App',
+        targetApp: 'http://localhost:3000',
+        platform: 'web',
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs: 50,
+        overallStatus: 'FAILED',
+        summary: { totalTests: 1, passed: 0, failed: 1, blocked: 0, skipped: 0, error: 0 },
+        trustScore: { score: 0, deterministicAssertionsCount: 0, evidenceArtifactsCount: 0, reproducibilityScore: 0, coverageScore: 0, honestyPenalty: 0, summary: '' },
+        capabilities: [],
+        testResults: [{
+          testCaseId: 'test-1',
+          title: 'Orphan test result',
+          status: 'FAILED',
+          durationMs: 50,
+          stepResults: [],
+          evidenceIds: [],
+          attemptCount: 1,
+        }],
+        findings: [],
+        evidence: [],
+        environmentInfo: {},
+      };
+
+      const reportPath = path.join(tempDir, 'prev-report-3.json');
+      fs.writeFileSync(reportPath, JSON.stringify(prevReport));
+
+      const registry = new CapabilityRegistry();
+      registry.registerAdapter(new CliMockAdapter({
+        id: 'web-standard',
+        platform: 'web',
+        state: 'AVAILABLE',
+      }));
+
+      const { exitCode, json } = await runCliCapture([
+        'verify-fix',
+        '--report', reportPath,
+        '--json',
+      ], { registryFactory: () => registry });
+
+      expect(exitCode).toBe(1);
+      expect(json.status).toBe('NOT_VERIFIED');
+      expect(json.verified).toBe(false);
+      expect(json.error).toContain('original scenario definitions not found');
     });
   });
 

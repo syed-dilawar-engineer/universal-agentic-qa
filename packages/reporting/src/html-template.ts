@@ -7,6 +7,7 @@ import {
   EvidenceArtifact,
 } from '@agentic-qa/schemas';
 import { HtmlReportOptions } from './types.js';
+import { formatTripartiteTitle } from './title-formatter.js';
 
 export async function generateHtmlDashboard(
   report: QARunReport,
@@ -542,6 +543,7 @@ function renderFindingCard(
   artifactDataMap: Map<string, { base64?: string; text?: string }>
 ): string {
   const sevClass = `severity-${finding.severity.toLowerCase()}`;
+  const formattedTitle = formatTripartiteTitle(finding);
   const screenshots = finding.evidenceIds
     .map((id) => ({ id, data: artifactDataMap.get(id) }))
     .filter((item) => item.data?.base64);
@@ -551,7 +553,7 @@ function renderFindingCard(
     <div class="finding-header">
       <div>
         <span class="test-badge badge-failed">${finding.severity}</span>
-        <strong style="margin-left: 8px; font-size: 15px;">${escapeHtml(finding.title)}</strong>
+        <strong style="margin-left: 8px; font-size: 15px;">${escapeHtml(formattedTitle)}</strong>
         <span style="color: var(--text-muted); font-size: 12px; margin-left: 8px;">ID: ${escapeHtml(finding.id)}</span>
       </div>
       <div>
@@ -559,6 +561,16 @@ function renderFindingCard(
       </div>
     </div>
     <p style="font-size: 13px; color: #cbd5e1; margin-bottom: 8px;">${escapeHtml(finding.description)}</p>
+
+    ${finding.rootCauseHypothesis ? `
+    <div style="background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 6px; padding: 10px 14px; margin: 10px 0; font-size: 13px;">
+      <div style="font-weight: 700; font-size: 11px; text-transform: uppercase; color: var(--accent); margin-bottom: 4px;">Root Cause Hypothesis</div>
+      <div style="margin-bottom: 4px;"><strong>Summary:</strong> ${escapeHtml(finding.rootCauseHypothesis.summary)}</div>
+      ${finding.rootCauseHypothesis.suspectedComponent ? `<div style="margin-bottom: 4px;"><strong>Suspected Component:</strong> <code>${escapeHtml(finding.rootCauseHypothesis.suspectedComponent)}</code></div>` : ''}
+      ${finding.rootCauseHypothesis.theoreticalFlawType ? `<div style="margin-bottom: 4px;"><strong>Theoretical Flaw Type:</strong> <code>${escapeHtml(finding.rootCauseHypothesis.theoreticalFlawType)}</code></div>` : ''}
+      ${finding.rootCauseHypothesis.suggestedFix ? `<div><strong>Suggested Fix:</strong> ${escapeHtml(finding.rootCauseHypothesis.suggestedFix)}</div>` : ''}
+    </div>
+    ` : ''}
 
     ${finding.reproductionSteps && finding.reproductionSteps.length > 0 ? `
     <div class="repro-steps">

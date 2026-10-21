@@ -144,7 +144,7 @@ export const DEFAULT_FUZZ_PAYLOADS: FuzzPayload[] = [
     expectedBehavior: 'Handled without string truncation or MySQL utf8mb3 crash.',
   },
 
-  // 4. Extremely long strings (100KB)
+  // 4. Extremely long strings (100KB to 5,000 characters)
   {
     id: 'LONG-01',
     name: '100KB repetitive ASCII string',
@@ -168,6 +168,48 @@ export const DEFAULT_FUZZ_PAYLOADS: FuzzPayload[] = [
     value: '%s%d%n'.repeat(1000),
     description: 'Format string tokens repeated 1000 times',
     expectedBehavior: 'Treated as literal string, no format string parsing vulnerabilities.',
+  },
+  {
+    id: 'LONG-5000',
+    name: '5,000 character stress blast (Boundary Test)',
+    category: 'long_string',
+    value: 'A'.repeat(5000), // Exactly 5,000 chars as requested by user
+    description: '5,000 continuous ASCII characters to verify length validation, DB truncation, and layout overflow',
+    expectedBehavior: 'Validated against maximum length limit or handled with graceful error message; must not silently truncate or burst layout.',
+  },
+  {
+    id: 'LONG-5000-EMOJI',
+    name: '5,000 byte multi-byte emoji blast',
+    category: 'long_string',
+    value: '🔥'.repeat(1250), // Exactly 5,000 bytes in UTF-8
+    description: '5,000 bytes 4-byte UTF-8 emojis to test multi-byte string length calculation',
+    expectedBehavior: 'Calculated using grapheme cluster or byte length without unhandled exception or MySQL 1366 error.',
+  },
+
+  // 4b. SQL Truncation & Advanced Injection
+  {
+    id: 'SQLI-TRUNC-01',
+    name: 'SQL Silent Truncation attack vector',
+    category: 'sql_injection',
+    value: 'admin' + ' '.repeat(30) + 'x',
+    description: 'SQL truncation payload exploiting non-strict database space trimming',
+    expectedBehavior: 'Rejected or preserved with full length; must not silently truncate to admin.',
+  },
+  {
+    id: 'UNICODE-TELUGU',
+    name: 'Telugu complex script shaping bomb',
+    category: 'unicode',
+    value: '\u0C1C\u0C4D\u0C1E\u0C3E', // జ్ఞా
+    description: 'Complex virama / script sequence known to trigger font shaping crashes',
+    expectedBehavior: 'Rendered safely without crash in text shaper or layout engine.',
+  },
+  {
+    id: 'UNICODE-HOMOGLYPH',
+    name: 'Cyrillic homoglyph spoofing (UTS #39)',
+    category: 'unicode',
+    value: '\u0430dm\u0456n', // Cyrillic а and і
+    description: 'Visual lookalike of admin to test skeleton normalization',
+    expectedBehavior: 'Detected as confusable or rejected if duplicate identities not permitted.',
   },
 
   // 5. Negative numbers & numeric boundaries
@@ -219,6 +261,30 @@ export const DEFAULT_FUZZ_PAYLOADS: FuzzPayload[] = [
     description: 'NaN literal token',
     expectedBehavior: 'Rejected as non-numeric instead of propagating NaN state.',
   },
+  {
+    id: 'NUM-INF',
+    name: 'IEEE 754 positive infinity',
+    category: 'numeric_boundary',
+    value: 'Infinity',
+    description: 'IEEE 754 floating point positive Infinity token',
+    expectedBehavior: 'Validated and rejected gracefully as non-finite number.',
+  },
+  {
+    id: 'NUM-NEG-INF',
+    name: 'IEEE 754 negative infinity',
+    category: 'numeric_boundary',
+    value: '-Infinity',
+    description: 'IEEE 754 floating point negative Infinity token',
+    expectedBehavior: 'Validated and rejected gracefully as non-finite number.',
+  },
+  {
+    id: 'NUM-SUBNORMAL',
+    name: 'IEEE 754 minimum subnormal double float',
+    category: 'numeric_boundary',
+    value: '5e-324',
+    description: 'Smallest non-zero positive subnormal double precision float (5e-324)',
+    expectedBehavior: 'Handled without underflow crash or deserialization error.',
+  },
 
   // 6. Null characters and control characters
   {
@@ -261,6 +327,56 @@ export const DEFAULT_FUZZ_PAYLOADS: FuzzPayload[] = [
     description: 'String "null" literal that could be coerced to object null',
     expectedBehavior: 'Treated as literal string "null", not coerced to null pointer.',
   },
+  {
+    id: 'CTRL-01',
+    name: 'C0 control null byte',
+    category: 'null_bytes',
+    value: '\x00',
+    description: 'C0 control code NUL byte (\\x00)',
+    expectedBehavior: 'Stripped or validated safely without C-string truncation or parse error.',
+  },
+  {
+    id: 'CTRL-02',
+    name: 'ANSI escape color code',
+    category: 'null_bytes',
+    value: '\x1b[31m',
+    description: 'ANSI escape sequence controlling terminal/console color formatting',
+    expectedBehavior: 'Stripped or sanitized; must not corrupt terminal output or log formatters.',
+  },
+  {
+    id: 'CTRL-03',
+    name: 'C0 control DEL delete byte',
+    category: 'null_bytes',
+    value: '\x7f',
+    description: 'C0/C1 control code DEL byte (\\x7f)',
+    expectedBehavior: 'Handled without text truncation or terminal distortion.',
+  },
+
+  // 7. Security injection & adversarial payloads
+  {
+    id: 'PATH-01',
+    name: 'Path traversal /etc/passwd',
+    category: 'path_traversal',
+    value: '../../../../etc/passwd',
+    description: 'Directory path traversal attempt to read /etc/passwd',
+    expectedBehavior: 'Input validated, stripped, or rejected; must not traverse file paths or throw 500.',
+  },
+  {
+    id: 'CMD-01',
+    name: 'OS command injection pipe',
+    category: 'command_injection',
+    value: '| id',
+    description: 'OS command chaining operator attempting to execute id command',
+    expectedBehavior: 'Input sanitized or parameterized without executing shell commands or throwing 500.',
+  },
+  {
+    id: 'PROTO-01',
+    name: 'Server-side prototype pollution',
+    category: 'prototype_pollution',
+    value: '__proto__',
+    description: 'Object prototype pollution property key (__proto__)',
+    expectedBehavior: 'Treated as literal string or rejected; Object.prototype must not be modified.',
+  },
 ];
 
 /**
@@ -280,9 +396,24 @@ export class BoundaryFuzzer {
       'long_string',
       'numeric_boundary',
       'null_bytes',
+      'adversarial_stress',
+      'path_traversal',
+      'command_injection',
+      'prototype_pollution',
     ];
 
-    let payloads = DEFAULT_FUZZ_PAYLOADS.filter((p) => categories.includes(p.category));
+    let payloads = DEFAULT_FUZZ_PAYLOADS.filter((p) => {
+      if (categories.includes(p.category)) return true;
+      if (
+        categories.includes('adversarial_stress') &&
+        (p.category === 'path_traversal' ||
+          p.category === 'command_injection' ||
+          p.category === 'prototype_pollution')
+      ) {
+        return true;
+      }
+      return false;
+    });
 
     if (options.customPayloads && options.customPayloads.length > 0) {
       payloads = [...options.customPayloads, ...payloads];
@@ -311,15 +442,28 @@ export class BoundaryFuzzer {
           })
         );
 
-        // 2. Fill with fuzz payload
-        const fillResult = await this.adapter.executeAction(
+        // 2. Fill with fuzz payload (use pasteText for payloads > 1000 chars to prevent typing timeouts)
+        const actionType = payload.value.length > 1000 ? 'pasteText' : 'fill';
+        let fillResult = await this.adapter.executeAction(
           createActionSpec({
-            type: 'fill',
+            type: actionType,
             target: options.targetInput,
             value: payload.value,
-            description: `Injecting ${payload.category} payload '${payload.name}' into '${options.targetInput}'`,
+            description: `Injecting ${payload.category} payload '${payload.name}' into '${options.targetInput}' via ${actionType}`,
           })
         );
+
+        if (!fillResult.success && actionType === 'pasteText') {
+          // Graceful fallback to fill if pasteText is unsupported by the platform adapter
+          fillResult = await this.adapter.executeAction(
+            createActionSpec({
+              type: 'fill',
+              target: options.targetInput,
+              value: payload.value,
+              description: `Injecting ${payload.category} payload '${payload.name}' into '${options.targetInput}' via fallback fill`,
+            })
+          );
+        }
 
         if (!fillResult.success && fillResult.error) {
           // If the browser/adapter refused to fill due to crash or unhandled error
@@ -497,6 +641,216 @@ export class BoundaryFuzzer {
       payloadResults,
       findings,
       durationMs: Date.now() - startTime,
+    };
+  }
+
+  /**
+   * Dedicated 5,000-character input stress test.
+   * Verifies whether an input field:
+   * 1. Crashes the UI or server when receiving 5,000 characters.
+   * 2. Silently truncates the input without providing user validation feedback.
+   * 3. Bursts parent flex/grid containers, causing horizontal layout overflow.
+   */
+  async execute5000CharStressTest(options: {
+    targetInput: string;
+    submitTarget?: string;
+    charCount?: number;
+    expectedMaxLength?: number;
+  }): Promise<{
+    passed: boolean;
+    charCount: number;
+    uiCrashed: boolean;
+    layoutOverflowed: boolean;
+    silentTruncationDetected: boolean;
+    finding?: Finding;
+  }> {
+    const charCount = options.charCount ?? 5000;
+    const testPayload = 'A'.repeat(charCount);
+
+    let uiCrashed = false;
+    let layoutOverflowed = false;
+    let silentTruncationDetected = false;
+    let failureReason = '';
+
+    try {
+      // 1. Inject characters using pasteText (for >1000 chars) or fill
+      const injectType = testPayload.length > 1000 ? 'pasteText' : 'fill';
+      let fillAction = await this.adapter.executeAction(
+        createActionSpec({
+          type: injectType,
+          target: options.targetInput,
+          value: testPayload,
+          timeoutMs: 15000,
+        })
+      );
+
+      if (!fillAction.success && injectType === 'pasteText') {
+        fillAction = await this.adapter.executeAction(
+          createActionSpec({
+            type: 'fill',
+            target: options.targetInput,
+            value: testPayload,
+            timeoutMs: 15000,
+          })
+        );
+      }
+
+      if (!fillAction.success) {
+        uiCrashed = true;
+        failureReason = fillAction.error || 'Failed to inject 5,000 characters into input';
+      }
+
+      // 2. Submit if requested
+      if (options.submitTarget && !uiCrashed) {
+        const submitAction = await this.adapter.executeAction(
+          createActionSpec({
+            type: 'click',
+            target: options.submitTarget,
+            timeoutMs: 10000,
+          })
+        );
+        if (!submitAction.success) {
+          uiCrashed = true;
+          failureReason = submitAction.error || 'Submit action failed during 5,000 character stress blast';
+        }
+      }
+
+      // Check console cleanliness after fill and submit
+      if (!uiCrashed) {
+        const consoleCheck = await this.adapter.executeAssertion(
+          createAssertionSpec({ type: 'consoleClean' })
+        );
+        if (!consoleCheck.passed) {
+          uiCrashed = true;
+          failureReason = `Console errors observed during 5000-char stress test: ${consoleCheck.message}`;
+        }
+      }
+
+      // 3. Check for silent truncation if expectedMaxLength was defined
+      if (options.expectedMaxLength && options.expectedMaxLength < charCount) {
+        let isSilentTruncation = false;
+
+        // Try noSilentTruncation assertion first
+        try {
+          const truncationCheck = await this.adapter.executeAssertion(
+            createAssertionSpec({
+              type: 'noSilentTruncation',
+              target: options.targetInput,
+              expected: options.expectedMaxLength,
+              metadata: { expectedLimit: options.expectedMaxLength },
+            })
+          );
+          if (!truncationCheck.passed) {
+            isSilentTruncation = true;
+          }
+        } catch {
+          // Assertion might not be supported on all adapters
+        }
+
+        // Check value.length and validity.tooLong via evaluate
+        try {
+          const evalRes = await this.adapter.executeAction(
+            createActionSpec({
+              type: 'evaluate',
+              value: `(() => {
+                const el = document.querySelector(${JSON.stringify(options.targetInput)});
+                if (!el) return null;
+                return {
+                  valueLength: typeof el.value === 'string' ? el.value.length : null,
+                  tooLong: el.validity ? el.validity.tooLong : false,
+                  valid: el.validity ? el.validity.valid : true,
+                  maxLength: el.maxLength,
+                };
+              })()`,
+            })
+          );
+          const info = typeof evalRes.output === 'object' && evalRes.output !== null && 'result' in evalRes.output
+            ? evalRes.output.result
+            : evalRes.output;
+
+          if (info && typeof info === 'object') {
+            if (info.tooLong) {
+              // HTML5 validity explicitly flagged input as too long (not silent truncation!)
+              isSilentTruncation = false;
+            } else if (info.valueLength !== null) {
+              // If value was silently cut down without any validity error
+              if (info.valueLength < charCount && info.valid && !info.tooLong && (info.maxLength === undefined || info.maxLength < 0)) {
+                isSilentTruncation = true;
+              } else if (info.valueLength === charCount && info.valid && !info.tooLong) {
+                // Input accepted 5000 chars without any validation error despite expectedMaxLength
+                isSilentTruncation = true;
+              }
+            }
+          }
+        } catch {
+          // Evaluation not supported
+        }
+
+        if (isSilentTruncation && !uiCrashed) {
+          silentTruncationDetected = true;
+          failureReason = `Input accepted ${charCount} characters without validation error or notification of max limit (${options.expectedMaxLength})`;
+        }
+      }
+
+      // 4. Check for layout overflow
+      const layoutCheck = await this.adapter.executeAssertion(
+        createAssertionSpec({
+          type: 'noLayoutOverflow',
+          message: 'Verify 5000 character input did not burst layout',
+        })
+      );
+      if (!layoutCheck.passed) {
+        layoutOverflowed = true;
+        failureReason = failureReason ? `${failureReason}; Layout overflow detected` : '5000 characters burst layout container';
+      }
+    } catch (err: any) {
+      uiCrashed = true;
+      failureReason = `Exception during 5000-char stress test: ${err.message}`;
+    }
+
+    const passed = !uiCrashed && !layoutOverflowed && !silentTruncationDetected;
+    let finding: Finding | undefined;
+
+    if (!passed) {
+      const now = new Date().toISOString();
+      finding = FindingSchema.parse({
+        id: `FIND-STRESS-5000-${Date.now()}`,
+        title: `Input stress failure on 5,000 character blast: ${options.targetInput}`,
+        description: `Injected 5,000 characters into '${options.targetInput}'. System failed verification: ${failureReason}`,
+        severity: uiCrashed ? 'CRITICAL' : 'HIGH',
+        status: 'CONFIRMED',
+        fixVerification: 'UNVERIFIED',
+        platform: this.adapter.platform,
+        preconditions: [`Target input: ${options.targetInput}`, `Payload length: ${charCount}`],
+        reproductionSteps: [
+          `1. Navigate to view with input '${options.targetInput}'.`,
+          `2. Fill input with ${charCount} continuous characters ('A'.repeat(${charCount})).`,
+          options.submitTarget ? `3. Click '${options.submitTarget}'.` : '3. Observe input field and layout.',
+          `4. Defect observed: ${failureReason}.`,
+        ],
+        expectedBehavior: `Input should enforce explicit length limits, show inline validation feedback, preserve responsive layout without horizontal blowout, and prevent silent DB truncation.`,
+        actualBehavior: failureReason,
+        evidenceIds: [],
+        reproducibilityCount: 1,
+        reproducibilitySuccessRate: 1.0,
+        detectedAt: now,
+        metadata: {
+          charCount,
+          targetInput: options.targetInput,
+          uiCrashed,
+          layoutOverflowed,
+          silentTruncationDetected,
+        },
+      });
+    }
+
+    return {
+      passed,
+      charCount,
+      uiCrashed,
+      layoutOverflowed,
+      silentTruncationDetected,
+      finding,
     };
   }
 }

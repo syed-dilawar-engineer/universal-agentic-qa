@@ -1,10 +1,12 @@
 import { CapabilityRegistry } from '@agentic-qa/core';
-import { CliWebAdapter } from '../adapters/web-adapter.js';
-import { CliMobileAdapter } from '../adapters/mobile-adapter.js';
+import { WebAdapter } from '@agentic-qa/adapter-web';
+import { MobileAdapter } from '@agentic-qa/adapter-mobile';
+import { DesktopAdapter } from '@agentic-qa/adapter-desktop';
 
 export function createDefaultRegistry(): CapabilityRegistry {
   const registry = new CapabilityRegistry();
-  registry.registerAdapter(new CliWebAdapter());
-  registry.registerAdapter(new CliMobileAdapter());
+  registry.registerAdapter(new WebAdapter());
+  registry.registerAdapter(new MobileAdapter());
+  registry.registerAdapter(new DesktopAdapter());
   return registry;
 }

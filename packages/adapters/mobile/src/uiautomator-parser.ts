@@ -1,28 +1,116 @@
 import { ElementBounds, UIElement } from './types.js';
 
-export function parseBounds(boundsStr?: string): ElementBounds | undefined {
-  if (!boundsStr) return undefined;
-  const match = boundsStr.match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
-  if (!match) return undefined;
+export function decodeXmlEntities(str: string): string {
+  if (!str) return str;
+  return str.replace(/&(?:quot|apos|#39|#x27|lt|gt|amp);/g, (match) => {
+    switch (match) {
+      case '&quot;':
+        return '"';
+      case '&apos;':
+      case '&#39;':
+      case '&#x27;':
+        return "'";
+      case '&lt;':
+        return '<';
+      case '&gt;':
+        return '>';
+      case '&amp;':
+        return '&';
+      default:
+        return match;
+    }
+  });
+}
 
-  const left = parseInt(match[1], 10);
-  const top = parseInt(match[2], 10);
-  const right = parseInt(match[3], 10);
-  const bottom = parseInt(match[4], 10);
-  const width = Math.max(0, right - left);
-  const height = Math.max(0, bottom - top);
-  const centerX = Math.round(left + width / 2);
-  const centerY = Math.round(top + height / 2);
+function parseRectObject(obj: Record<string, any>): ElementBounds | undefined {
+  if (
+    obj.x !== undefined &&
+    obj.y !== undefined &&
+    obj.width !== undefined &&
+    obj.height !== undefined
+  ) {
+    const left = parseFloat(String(obj.x));
+    const top = parseFloat(String(obj.y));
+    const width = Math.max(0, parseFloat(String(obj.width)));
+    const height = Math.max(0, parseFloat(String(obj.height)));
+    if (isNaN(left) || isNaN(top) || isNaN(width) || isNaN(height)) return undefined;
+    const right = left + width;
+    const bottom = top + height;
+    const centerX = Math.round(left + width / 2);
+    const centerY = Math.round(top + height / 2);
+    return { left, top, right, bottom, centerX, centerY, width, height };
+  }
+  return undefined;
+}
 
-  return { left, top, right, bottom, centerX, centerY, width, height };
+export function parseBounds(
+  boundsInput?: string | Record<string, any>,
+  rectAttrs?: Record<string, any>
+): ElementBounds | undefined {
+  if (!boundsInput && !rectAttrs) return undefined;
+
+  // 1. Direct rect object support
+  if (typeof boundsInput === 'object' && boundsInput !== null) {
+    const res = parseRectObject(boundsInput);
+    if (res) return res;
+  }
+
+  // 2. Android bounds string: [x1,y1][x2,y2]
+  if (typeof boundsInput === 'string') {
+    const match = boundsInput.match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
+    if (match) {
+      const left = parseInt(match[1], 10);
+      const top = parseInt(match[2], 10);
+      const right = parseInt(match[3], 10);
+      const bottom = parseInt(match[4], 10);
+      const width = Math.max(0, right - left);
+      const height = Math.max(0, bottom - top);
+      const centerX = Math.round(left + width / 2);
+      const centerY = Math.round(top + height / 2);
+      return { left, top, right, bottom, centerX, centerY, width, height };
+    }
+
+    // iOS/Appium rect string: x="0" y="0" width="100" height="200"
+    const rectMatch = boundsInput.match(
+      /(?:^|\s)x=["']?(-?\d+(?:\.\d+)?)["']?\s+y=["']?(-?\d+(?:\.\d+)?)["']?\s+width=["']?(-?\d+(?:\.\d+)?)["']?\s+height=["']?(-?\d+(?:\.\d+)?)["']?/
+    );
+    if (rectMatch) {
+      return parseRectObject({
+        x: rectMatch[1],
+        y: rectMatch[2],
+        width: rectMatch[3],
+        height: rectMatch[4],
+      });
+    }
+
+    // JSON rect string: {"x": 0, "y": 0, "width": 100, "height": 200}
+    if (boundsInput.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(boundsInput);
+        const res = parseRectObject(parsed);
+        if (res) return res;
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  // 3. Fallback to rect attributes dictionary (e.g. from iOS/Appium XML attributes)
+  if (rectAttrs && typeof rectAttrs === 'object') {
+    const res = parseRectObject(rectAttrs);
+    if (res) return res;
+  }
+
+  return undefined;
 }
 
 export function parseUIHierarchy(xml: string): UIElement[] {
   const elements: UIElement[] = [];
   if (!xml || typeof xml !== 'string') return elements;
 
-  // Regex to extract all XML tags and their attributes
-  const nodeTagRegex = /<([a-zA-Z0-9_\-\.:]+)\s+([^>]*?)(\/?>)/g;
+  // Regex to extract all XML tags and their attributes safely without truncating on '>' inside quoted attributes
+  const nodeTagRegex =
+    /<([a-zA-Z0-9_\-\.:]+)((?:\s+[^"'\s>\/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>\/]+))?)*)\s*(\/?>)/g;
   let match: RegExpExecArray | null;
 
   while ((match = nodeTagRegex.exec(xml)) !== null) {
@@ -30,25 +118,30 @@ export function parseUIHierarchy(xml: string): UIElement[] {
     const rawAttrs = match[2];
 
     const attributes: Record<string, string> = {};
-    const attrRegex = /([a-zA-Z0-9_\-\.:]+)=(?:"([^"]*)"|'([^']*)')/g;
+    const attrRegex = /([a-zA-Z0-9_\-\.:]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
     let attrMatch: RegExpExecArray | null;
     while ((attrMatch = attrRegex.exec(rawAttrs)) !== null) {
-      attributes[attrMatch[1]] = attrMatch[2] !== undefined ? attrMatch[2] : attrMatch[3] ?? '';
+      const val = attrMatch[2] !== undefined ? attrMatch[2] : attrMatch[3] ?? '';
+      attributes[attrMatch[1]] = decodeXmlEntities(val);
     }
 
-    const bounds = parseBounds(attributes['bounds']);
+    const bounds = parseBounds(attributes['bounds'], attributes);
     const enabled = attributes['enabled'] === 'true' || attributes['isEnabled'] === 'true';
     const clickable = attributes['clickable'] === 'true';
     const visible =
       attributes['visible-to-user'] !== 'false' &&
       attributes['displayed'] !== 'false' &&
+      attributes['visible'] !== 'false' &&
       (bounds ? bounds.width > 0 && bounds.height > 0 : true);
 
     elements.push({
       tag: tagName,
-      text: attributes['text'] || attributes['label'] || attributes['name'] || attributes['value'],
+      text: attributes['text'] || attributes['label'] || attributes['value'] || attributes['name'],
       resourceId: attributes['resource-id'] || attributes['identifier'] || attributes['id'],
-      contentDesc: attributes['content-desc'] || attributes['accessibilityIdentifier'],
+      contentDesc:
+        attributes['content-desc'] ||
+        attributes['accessibilityIdentifier'] ||
+        attributes['accessibility-id'],
       className: attributes['class'] || attributes['type'],
       packageName: attributes['package'],
       enabled,

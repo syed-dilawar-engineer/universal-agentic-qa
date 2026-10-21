@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   PlatformAdapter,
+  ActionResult,
 } from '@agentic-qa/core';
 import {
   ActionSpec,
@@ -51,7 +52,7 @@ class MockRobustnessAdapter implements PlatformAdapter {
 
   async initialize(): Promise<void> {}
 
-  async executeAction(action: ActionSpec) {
+  async executeAction(action: ActionSpec): Promise<ActionResult> {
     this.actionHistory.push(action);
 
     if (action.type === 'click') {
@@ -206,6 +207,54 @@ describe('SeededRandom', () => {
     const shuffled = rng.shuffle(items);
     expect(shuffled).toHaveLength(items.length);
     expect(shuffled.sort()).toEqual([...items].sort());
+  });
+
+  it('calculates AWS Full Jitter backoff within bounds and deterministically', () => {
+    const rng = new SeededRandom(42);
+    const baseMs = 100;
+    const capMs = 10000;
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const backoff = rng.backoffWithFullJitter(attempt, baseMs, capMs);
+      expect(backoff).toBeGreaterThanOrEqual(0);
+      expect(backoff).toBeLessThanOrEqual(capMs);
+      const expectedMax = Math.min(capMs, baseMs * Math.pow(2, attempt));
+      expect(backoff).toBeLessThanOrEqual(expectedMax);
+    }
+
+    // Huge attempt should be capped at capMs
+    const capped = rng.backoffWithFullJitter(50, 100, 2000);
+    expect(capped).toBeLessThanOrEqual(2000);
+    expect(capped).toBeGreaterThanOrEqual(0);
+
+    // Negative attempt should be clamped safely
+    const negative = rng.backoffWithFullJitter(-5, 100, 2000);
+    expect(negative).toBeLessThanOrEqual(100);
+    expect(negative).toBeGreaterThanOrEqual(0);
+  });
+
+  it('picks weighted elements proportionally and validates inputs', () => {
+    const rng = new SeededRandom(12345);
+    const items = [
+      { item: 'rare', weight: 1 },
+      { item: 'common', weight: 99 },
+    ];
+
+    const counts: Record<string, number> = { rare: 0, common: 0 };
+    for (let i = 0; i < 500; i++) {
+      const choice = rng.pickWeighted(items);
+      counts[choice]++;
+    }
+
+    expect(counts.common).toBeGreaterThan(counts.rare * 10);
+
+    expect(() => rng.pickWeighted([])).toThrow('Cannot pick from an empty array');
+    expect(() =>
+      rng.pickWeighted([
+        { item: 'a', weight: 0 },
+        { item: 'b', weight: -1 },
+      ])
+    ).toThrow('Total weight must be positive');
   });
 });
 
@@ -369,6 +418,52 @@ describe('RapidInteractionRunner', () => {
     expect(result.passed).toBe(true);
     expect(result.eventsIssued).toBe(20);
   });
+
+  it('does not produce false positive debouncing failure when driver succeeds on disabled button', async () => {
+    const adapter = new MockRobustnessAdapter();
+    adapter.buttonDisabledAfterFirstClick = true;
+    // Driver dispatch returns success: true even though button is disabled (e.g. Playwright force click / mobile pointer)
+    adapter.failClicksWhenDisabled = false;
+
+    const runner = new RapidInteractionRunner(adapter);
+    const result = await runner.run({
+      targetButton: '#submit-btn',
+      rapidClickCount: 50,
+      dispatchMode: 'burst',
+      batchSize: 10,
+    });
+
+    // Should NOT falsely claim debouncing failed
+    expect(result.passed).toBe(true);
+    expect(result.buttonDisabledAfterTrigger).toBe(true);
+    expect(result.duplicateSubmissionsDetected).toBe(false);
+    expect(result.eventsRejected).toBe(50);
+    expect(result.eventsAccepted).toBe(0);
+    expect(result.finding).toBeUndefined();
+  });
+
+  it('checks UI responsiveness on body and does not false-hang if target button navigates away', async () => {
+    const adapter = new MockRobustnessAdapter();
+    adapter.buttonDisabledAfterFirstClick = true;
+
+    // After click, target button disappears (e.g. navigation / unmounted form)
+    const origAssertion = adapter.executeAssertion.bind(adapter);
+    adapter.executeAssertion = async (assertion: AssertionSpec) => {
+      if (assertion.type === 'elementExists' && assertion.target === '#navigating-btn') {
+        // Target button is now gone
+        return { passed: false, durationMs: 1 };
+      }
+      return origAssertion(assertion);
+    };
+
+    const runner = new RapidInteractionRunner(adapter);
+    const result = await runner.run({
+      targetButton: '#navigating-btn',
+      rapidClickCount: 10,
+    });
+
+    expect(result.uiHung).toBe(false);
+  });
 });
 
 // ============================================================================
@@ -450,6 +545,48 @@ describe('MonkeyExplorer', () => {
 
     expect(result.visitedStates.length).toBeGreaterThan(1);
     expect(result.stateTransitionCount).toBeGreaterThan(0);
+  });
+
+  it('correctly records distinct stateBefore and stateAfter across transitions in trace', async () => {
+    const adapter = new MockRobustnessAdapter();
+    let counter = 0;
+    const states = ['/login', '/dashboard', '/profile', '/settings'];
+
+    const explorer = new MonkeyExplorer(adapter);
+    const result = await explorer.run({
+      maxActions: 6,
+      seed: 42,
+      stateExtractor: async () => {
+        counter++;
+        return states[counter % states.length];
+      },
+    });
+
+    expect(result.stateTransitionCount).toBeGreaterThan(0);
+    // Find steps where state transition happened
+    const transitionSteps = result.trace.filter((s) => s.stateBefore !== s.stateAfter);
+    expect(transitionSteps.length).toBeGreaterThan(0);
+    for (const step of transitionSteps) {
+      expect(step.stateBefore).not.toBe(step.stateAfter);
+    }
+  });
+
+  it('disambiguates generic button selectors to avoid Playwright strict mode collisions', async () => {
+    const adapter = new MockRobustnessAdapter();
+    adapter.executeAction = async (action: ActionSpec) => {
+      if (action.type === 'evaluate') {
+        return {
+          success: true,
+          durationMs: 1,
+          output: ['#btn-submit', '[data-testid="cancel-btn"]', 'button >> nth=2'],
+        };
+      }
+      return { success: true, durationMs: 1 };
+    };
+
+    const explorer = new MonkeyExplorer(adapter);
+    const disambiguated = await (explorer as any).resolveSpecificTarget('button', new SeededRandom(42));
+    expect(['#btn-submit', '[data-testid="cancel-btn"]', 'button >> nth=2']).toContain(disambiguated);
   });
 
   it('catches console crash during exploration and creates CONFIRMED finding with trace', async () => {
@@ -700,6 +837,85 @@ describe('BoundaryFuzzer', () => {
     expect(result.failedCount).toBe(1);
     expect(result.findings[0].severity).toBe('CRITICAL');
   });
+
+  it('covers path traversal, command injection, prototype pollution, control codes, and float boundaries', () => {
+    const payloads = DEFAULT_FUZZ_PAYLOADS;
+
+    // Path traversal
+    const pathTraversal = payloads.find((p) => p.value.includes('../../../../etc/passwd'));
+    expect(pathTraversal).toBeDefined();
+
+    // Command injection
+    const cmdInjection = payloads.find((p) => p.value === '| id');
+    expect(cmdInjection).toBeDefined();
+
+    // Prototype pollution
+    const protoPollution = payloads.find((p) => p.value === '__proto__');
+    expect(protoPollution).toBeDefined();
+
+    // C0/C1 control codes
+    const nullByte = payloads.find((p) => p.value === '\x00');
+    expect(nullByte).toBeDefined();
+    const ansiCode = payloads.find((p) => p.value === '\x1b[31m');
+    expect(ansiCode).toBeDefined();
+    const delCode = payloads.find((p) => p.value === '\x7f');
+    expect(delCode).toBeDefined();
+
+    // IEEE 754 float boundaries
+    const posInf = payloads.find((p) => p.value === 'Infinity');
+    expect(posInf).toBeDefined();
+    const negInf = payloads.find((p) => p.value === '-Infinity');
+    expect(negInf).toBeDefined();
+    const subnormal = payloads.find((p) => p.value === '5e-324');
+    expect(subnormal).toBeDefined();
+  });
+
+  it('uses pasteText instead of fill for payloads > 1000 characters', async () => {
+    const adapter = new MockRobustnessAdapter();
+    const actionsSeen: ActionSpec[] = [];
+    adapter.executeAction = async (action: ActionSpec) => {
+      actionsSeen.push(action);
+      return { success: true, durationMs: 1 };
+    };
+
+    const fuzzer = new BoundaryFuzzer(adapter);
+    await fuzzer.run({
+      targetInput: '#bio',
+      categories: ['long_string'],
+      fuzzIterations: 1, // LONG-01 is 100KB > 1000 chars
+    });
+
+    const injectAction = actionsSeen.find(
+      (a) => a.target === '#bio' && (a.type === 'pasteText' || a.type === 'fill')
+    );
+    expect(injectAction).toBeDefined();
+    expect(injectAction?.type).toBe('pasteText');
+  });
+
+  it('execute5000CharStressTest uses pasteText and noSilentTruncation without brittle text matching', async () => {
+    const adapter = new MockRobustnessAdapter();
+    const assertionsRun: AssertionSpec[] = [];
+    adapter.executeAssertion = async (assertion: AssertionSpec) => {
+      assertionsRun.push(assertion);
+      return { passed: true, durationMs: 1 };
+    };
+
+    const fuzzer = new BoundaryFuzzer(adapter);
+    const res = await fuzzer.execute5000CharStressTest({
+      targetInput: '#long-text',
+      expectedMaxLength: 100,
+      charCount: 5000,
+    });
+
+    expect(res.passed).toBe(true);
+    // Verified noSilentTruncation assertion was checked
+    const truncationAssertion = assertionsRun.find((a) => a.type === 'noSilentTruncation');
+    expect(truncationAssertion).toBeDefined();
+    expect(truncationAssertion?.target).toBe('#long-text');
+    // Verified no brittle 'too long' substring check on body
+    const brittleCheck = assertionsRun.find((a) => a.expected === 'too long');
+    expect(brittleCheck).toBeUndefined();
+  });
 });
 
 // ============================================================================
@@ -781,6 +997,35 @@ describe('Robustness Engine Edge Cases & Integration', () => {
 
     expect(result.totalActions).toBe(5);
     expect(result.trace.every((t) => t.action.target === 'body' || t.action.type === 'wait')).toBe(true);
+  });
+
+  it('supports 5000-character input stress testing and detects crashes/overflows', async () => {
+    const adapter = new MockRobustnessAdapter();
+    const fuzzer = new BoundaryFuzzer(adapter);
+
+    // Clean pass
+    const cleanRes = await fuzzer.execute5000CharStressTest({
+      targetInput: '#comment',
+      charCount: 5000,
+    });
+    expect(cleanRes.passed).toBe(true);
+    expect(cleanRes.charCount).toBe(5000);
+    expect(cleanRes.finding).toBeUndefined();
+
+    // Defect detection when console crash occurs
+    const buggyAdapter = new MockRobustnessAdapter();
+    buggyAdapter.consoleErrors = ['Uncaught RangeError: Maximum call stack size exceeded in layout tree'];
+    const buggyFuzzer = new BoundaryFuzzer(buggyAdapter);
+    const failRes = await buggyFuzzer.execute5000CharStressTest({
+      targetInput: '#comment',
+      charCount: 5000,
+      submitTarget: '#submit',
+    });
+    expect(failRes.passed).toBe(false);
+    expect(failRes.uiCrashed).toBe(true);
+    expect(failRes.finding).toBeDefined();
+    expect(failRes.finding?.severity).toBe('CRITICAL');
+    expect(() => FindingSchema.parse(failRes.finding)).not.toThrow();
   });
 
   it('all findings generated across engines strictly satisfy FindingSchema', async () => {

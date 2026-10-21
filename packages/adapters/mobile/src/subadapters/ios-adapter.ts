@@ -36,6 +36,7 @@ export class IosAdapter implements PlatformAdapter, MobileLifecycleActions {
   private appPath?: string;
   private outputDir: string;
   private isInitialized = false;
+  private uiHierarchyXml?: string;
 
   constructor(options: MobileAdapterOptions = {}) {
     this.executor = options.executor || new DefaultCommandExecutor();
@@ -44,6 +45,14 @@ export class IosAdapter implements PlatformAdapter, MobileLifecycleActions {
     this.bundleId = options.bundleId;
     this.appPath = options.appPath;
     this.outputDir = options.outputDir || path.resolve('.qa-output', 'evidence');
+    this.uiHierarchyXml = options.uiHierarchyXml;
+  }
+
+  private async getUIHierarchyXml(): Promise<string> {
+    if (this.uiHierarchyXml) {
+      return this.uiHierarchyXml;
+    }
+    return '';
   }
 
   private getDeviceFlag(): string {
@@ -246,6 +255,16 @@ export class IosAdapter implements PlatformAdapter, MobileLifecycleActions {
             if (coordMatch) {
               x = parseInt(coordMatch[1], 10);
               y = parseInt(coordMatch[2], 10);
+            } else {
+              const xml = await this.getUIHierarchyXml();
+              if (xml) {
+                const elements = parseUIHierarchy(xml);
+                const el = findElement(elements, action.target);
+                if (el && el.bounds) {
+                  x = el.bounds.centerX;
+                  y = el.bounds.centerY;
+                }
+              }
             }
           } else if (action.value && typeof action.value === 'object' && 'x' in action.value) {
             x = action.value.x;
@@ -267,6 +286,60 @@ export class IosAdapter implements PlatformAdapter, MobileLifecycleActions {
             durationMs: Date.now() - start,
             output: { tappedCoordinates: { x, y } },
             error: res.exitCode !== 0 ? res.stderr : undefined,
+          };
+        }
+
+        case 'navigate': {
+          const url = String(action.value || action.target || '');
+          if (!url) {
+            return {
+              success: false,
+              durationMs: Date.now() - start,
+              error: 'navigate action requires a target URL or deep link',
+            };
+          }
+
+          const res = await this.executor.exec('xcrun', [
+            'simctl',
+            'openurl',
+            this.getDeviceFlag(),
+            url,
+          ]);
+
+          return {
+            success: res.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { url },
+            error: res.exitCode !== 0 ? res.stderr : undefined,
+          };
+        }
+
+        case 'triggerProcessDeath': {
+          const targetBundle =
+            action.target ||
+            (typeof action.value === 'string' ? action.value : action.value?.bundleId) ||
+            this.bundleId;
+
+          if (!targetBundle) {
+            return {
+              success: false,
+              durationMs: Date.now() - start,
+              error: 'triggerProcessDeath requires a target bundleId',
+            };
+          }
+
+          const termRes = await this.executor.exec('xcrun', [
+            'simctl',
+            'terminate',
+            this.getDeviceFlag(),
+            targetBundle,
+          ]);
+
+          return {
+            success: termRes.exitCode === 0,
+            durationMs: Date.now() - start,
+            output: { bundleId: targetBundle, mechanism: 'xcrun simctl terminate' },
+            error: termRes.exitCode !== 0 ? termRes.stderr : undefined,
           };
         }
 
@@ -455,40 +528,174 @@ export class IosAdapter implements PlatformAdapter, MobileLifecycleActions {
 
   async executeAssertion(assertion: AssertionSpec): Promise<AssertionResult> {
     const start = Date.now();
+    const xml = await this.getUIHierarchyXml();
+    if (!xml || xml.trim().length === 0) {
+      return {
+        passed: false,
+        expected: assertion.expected,
+        actual: undefined,
+        durationMs: Date.now() - start,
+        message: `Cannot evaluate assertion '${assertion.type}': UI hierarchy XML is unavailable for iOS Simulator. Provide uiHierarchyXml or configure an accessibility inspector.`,
+      };
+    }
 
-    // Query simulator UI or accessibility state
+    const elements = parseUIHierarchy(xml);
+    const element = assertion.target ? findElement(elements, assertion.target) : undefined;
+
     switch (assertion.type) {
       case 'elementVisible': {
-        const target = assertion.target || '';
-        // If target exists in ui inspection or simulated state
+        const passed = Boolean(element && element.visible);
         return {
-          passed: Boolean(target),
+          passed,
           expected: true,
-          actual: Boolean(target),
+          actual: passed,
           durationMs: Date.now() - start,
-          message: target ? `Element '${target}' is visible` : 'No target element specified',
+          message: passed
+            ? `Element '${assertion.target}' is visible`
+            : `Element '${assertion.target}' is not visible or not found in UI hierarchy`,
+        };
+      }
+
+      case 'elementHidden': {
+        const passed = !element || !element.visible;
+        return {
+          passed,
+          expected: true,
+          actual: passed,
+          durationMs: Date.now() - start,
+          message: passed
+            ? `Element '${assertion.target}' is hidden or absent`
+            : `Element '${assertion.target}' is visible`,
+        };
+      }
+
+      case 'elementExists': {
+        const passed = Boolean(element);
+        return {
+          passed,
+          expected: true,
+          actual: passed,
+          durationMs: Date.now() - start,
+          message: passed
+            ? `Element '${assertion.target}' exists in UI hierarchy`
+            : `Element '${assertion.target}' not found in UI hierarchy`,
         };
       }
 
       case 'elementTextEquals': {
-        const target = assertion.target || '';
+        if (!element) {
+          return {
+            passed: false,
+            expected: assertion.expected,
+            actual: undefined,
+            durationMs: Date.now() - start,
+            message: `Element '${assertion.target}' not found in UI hierarchy`,
+          };
+        }
         const expected = String(assertion.expected ?? '');
+        const actual = element.text ?? '';
+        const passed = actual === expected;
         return {
-          passed: true,
+          passed,
           expected,
-          actual: expected,
+          actual,
           durationMs: Date.now() - start,
-          message: `Element '${target}' text matched expected '${expected}'`,
+          message: passed
+            ? `Element '${assertion.target}' text matched expected '${expected}'`
+            : `Element '${assertion.target}' text '${actual}' did not match expected '${expected}'`,
+        };
+      }
+
+      case 'elementTextContains': {
+        if (!element) {
+          return {
+            passed: false,
+            expected: assertion.expected,
+            actual: undefined,
+            durationMs: Date.now() - start,
+            message: `Element '${assertion.target}' not found in UI hierarchy`,
+          };
+        }
+        const expected = String(assertion.expected ?? '');
+        const actual = element.text ?? '';
+        const passed = actual.includes(expected);
+        return {
+          passed,
+          expected,
+          actual,
+          durationMs: Date.now() - start,
+          message: passed
+            ? `Element '${assertion.target}' text contains expected '${expected}'`
+            : `Element '${assertion.target}' text '${actual}' does not contain '${expected}'`,
         };
       }
 
       case 'elementDisabled': {
+        if (!element) {
+          return {
+            passed: false,
+            expected: true,
+            actual: undefined,
+            durationMs: Date.now() - start,
+            message: `Element '${assertion.target}' not found in UI hierarchy`,
+          };
+        }
+        const passed = !element.enabled;
         return {
-          passed: true,
+          passed,
           expected: true,
-          actual: true,
+          actual: passed,
           durationMs: Date.now() - start,
-          message: `Element '${assertion.target}' is disabled`,
+          message: passed
+            ? `Element '${assertion.target}' is disabled`
+            : `Element '${assertion.target}' is enabled (expected disabled)`,
+        };
+      }
+
+      case 'elementEnabled': {
+        if (!element) {
+          return {
+            passed: false,
+            expected: true,
+            actual: undefined,
+            durationMs: Date.now() - start,
+            message: `Element '${assertion.target}' not found in UI hierarchy`,
+          };
+        }
+        const passed = Boolean(element.enabled);
+        return {
+          passed,
+          expected: true,
+          actual: passed,
+          durationMs: Date.now() - start,
+          message: passed
+            ? `Element '${assertion.target}' is enabled`
+            : `Element '${assertion.target}' is disabled (expected enabled)`,
+        };
+      }
+
+      case 'targetSizeAAA': {
+        if (!element || !element.bounds) {
+          return {
+            passed: false,
+            expected: 'At least 44x44 touch target area',
+            actual: 'Element not found',
+            durationMs: Date.now() - start,
+            message: `Target element '${assertion.target}' not found for WCAG touch target check`,
+          };
+        }
+        const width = element.bounds.width;
+        const height = element.bounds.height;
+        const minRequired = assertion.metadata?.minSize ?? 44;
+        const passed = width >= minRequired && height >= minRequired;
+        return {
+          passed,
+          expected: `>= ${minRequired}x${minRequired}`,
+          actual: `${width}x${height}`,
+          durationMs: Date.now() - start,
+          message: passed
+            ? `Touch target '${assertion.target}' meets AAA target size (${width}x${height} >= ${minRequired}x${minRequired})`
+            : `Touch target '${assertion.target}' does NOT meet AAA target size (${width}x${height} < ${minRequired}x${minRequired})`,
         };
       }
 
@@ -581,6 +788,32 @@ export class IosAdapter implements PlatformAdapter, MobileLifecycleActions {
         metadata: {
           deviceId: this.selectedDeviceId,
           exitCode: res.exitCode,
+        },
+      };
+    }
+
+    if (
+      type === 'DOM_SNAPSHOT' ||
+      type === 'UI_HIERARCHY' ||
+      type === 'DOM'
+    ) {
+      const filePath = path.join(this.outputDir, `ios-hierarchy-${timestamp}.xml`);
+      const xml = await this.getUIHierarchyXml();
+      const buffer = Buffer.from(xml, 'utf8');
+      fs.writeFileSync(filePath, buffer);
+      const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+
+      return {
+        id,
+        type: 'DOM_SNAPSHOT',
+        path: filePath,
+        sha256,
+        sizeBytes: buffer.length,
+        mimeType: 'application/xml',
+        capturedAt: new Date().toISOString(),
+        description: description || 'iOS simulator UI hierarchy',
+        metadata: {
+          deviceId: this.selectedDeviceId,
         },
       };
     }

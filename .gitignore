@@ -1,6 +1,46 @@
+# Dependencies
 node_modules/
+.pnpm-store/
+
+# Build artifacts
 dist/
-.qa-output/
-*.log
+build/
 *.tsbuildinfo
+
+# QA Output and Local Runs
+.qa-output/
+reports/*.html
+reports/*.png
+reports/*.json
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment and Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test coverage
+coverage/
+*.lcov
+
+# IDE & OS Metadata
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

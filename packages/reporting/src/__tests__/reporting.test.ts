@@ -821,5 +821,74 @@ describe('ReportFormatter', () => {
     expect(html).toContain('<!DOCTYPE html>');
     expect(html).not.toContain('data:image/png;base64,');
   });
+
+  it('renders rootCauseHypothesis and tripartite title in markdown and HTML reports', async () => {
+    const reportWithHypothesis: QARunReport = {
+      ...sampleReport,
+      findings: [
+        {
+          ...sampleReport.findings[0],
+          rootCauseHypothesis: {
+            summary: 'Stale React state closure on promo code input handler',
+            suspectedComponent: 'PromoCodeInput',
+            theoreticalFlawType: 'STALE_CLOSURE',
+            suggestedFix: 'Use functional state update or useRef for current promo value',
+          },
+        },
+      ],
+    };
+
+    // Test Markdown
+    const md = ReportFormatter.formatMarkdown(reportWithHypothesis);
+    expect(md).toContain('[PromoCodeInput] [Navigate to /cart] -> [Discount code does not apply coupon savings]');
+    expect(md).toContain('**Root Cause Hypothesis:**');
+    expect(md).toContain('Stale React state closure on promo code input handler');
+    expect(md).toContain('PromoCodeInput');
+    expect(md).toContain('STALE_CLOSURE');
+    expect(md).toContain('Use functional state update or useRef for current promo value');
+
+    // Test HTML
+    const html = await ReportFormatter.formatHtml(reportWithHypothesis, { embedArtifacts: false });
+    expect(html).toContain('[PromoCodeInput] [Navigate to /cart]');
+    expect(html).toContain('Discount code does not apply coupon savings');
+    expect(html).toContain('Root Cause Hypothesis');
+    expect(html).toContain('Stale React state closure on promo code input handler');
+    expect(html).toContain('PromoCodeInput');
+    expect(html).toContain('STALE_CLOSURE');
+    expect(html).toContain('Use functional state update or useRef for current promo value');
+  });
+
+  it('formatTripartiteTitle preserves existing tripartite titles and formats raw titles truthfully', () => {
+    const { formatTripartiteTitle } = ReportFormatter as any;
+
+    // 1. Existing tripartite title
+    const finding1: Finding = {
+      id: 'F-1',
+      title: '[Auth] [Clicking Login] -> [App crashes with 500 error]',
+      description: '',
+      severity: 'CRITICAL',
+      status: 'CONFIRMED',
+      fixVerification: 'UNVERIFIED',
+      platform: 'web',
+      preconditions: [],
+      reproductionSteps: [],
+      expectedBehavior: '',
+      actualBehavior: '',
+      evidenceIds: [],
+      reproducibilityCount: 1,
+      reproducibilitySuccessRate: 1,
+      detectedAt: new Date().toISOString(),
+      metadata: {},
+    };
+    expect(formatTripartiteTitle(finding1)).toBe('[Auth] [Clicking Login] -> [App crashes with 500 error]');
+
+    // 2. Custom metadata module and trigger
+    const finding2: Finding = {
+      ...finding1,
+      title: 'Modal fails to close on ESC key',
+      metadata: { module: 'ModalDialog', trigger: 'Pressing Escape' },
+    };
+    expect(formatTripartiteTitle(finding2)).toBe('[ModalDialog] [Pressing Escape] -> [Modal fails to close on ESC key]');
+  });
 });
 

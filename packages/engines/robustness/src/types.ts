@@ -130,7 +130,23 @@ export type FuzzCategory =
   | 'unicode'
   | 'long_string'
   | 'numeric_boundary'
-  | 'null_bytes';
+  | 'null_bytes'
+  | 'semantic_format'
+  | 'adversarial_stress'
+  | 'path_traversal'
+  | 'command_injection'
+  | 'prototype_pollution';
+
+export type FieldSemanticType =
+  | 'text'
+  | 'textarea'
+  | 'email'
+  | 'password'
+  | 'number'
+  | 'currency'
+  | 'phone'
+  | 'date'
+  | 'url';
 
 export interface FuzzPayload {
   id: string;

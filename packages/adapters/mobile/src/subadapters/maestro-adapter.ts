@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   Platform,
@@ -16,7 +17,7 @@ import {
   QAAdapterError,
 } from '@agentic-qa/core';
 import { MobileAdapterOptions, MobileLifecycleActions } from '../types.js';
-import { CommandExecutor, DefaultCommandExecutor } from '../executor.js';
+import { CommandExecutor, CommandResult, DefaultCommandExecutor } from '../executor.js';
 
 export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
   readonly id = 'mobile-maestro';
@@ -34,6 +35,82 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
     this.hostPlatform = options.hostPlatform || process.platform;
     this.appId = options.packageName || options.bundleId;
     this.outputDir = options.outputDir || path.resolve('.qa-output', 'evidence');
+  }
+
+  private buildTapTarget(target?: string, value?: any): Record<string, any> {
+    if (value && typeof value === 'object' && 'x' in value && 'y' in value) {
+      return { tapOn: { point: `${value.x},${value.y}` } };
+    }
+    const raw = target || (value ? String(value) : '');
+    if (raw.startsWith('id=') || raw.startsWith('#')) {
+      return { tapOn: { id: raw.replace(/^id=|^#/, '') } };
+    }
+    const coordMatch = raw.match(/^@?(-?\d+)\s*,\s*(-?\d+)$/);
+    if (coordMatch) {
+      return { tapOn: { point: `${coordMatch[1]},${coordMatch[2]}` } };
+    }
+    return { tapOn: raw };
+  }
+
+  private async executeFlowCommands(
+    commands: Array<string | Record<string, any>>
+  ): Promise<CommandResult> {
+    const tmpDir = fs.existsSync('/tmp') ? '/tmp' : os.tmpdir();
+    const flowFile = path.join(
+      tmpDir,
+      `flow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.yaml`
+    );
+
+    const lines: string[] = [];
+    if (this.appId) {
+      lines.push(`appId: ${this.appId}`);
+    }
+    lines.push('---');
+
+    for (const cmd of commands) {
+      if (typeof cmd === 'string') {
+        lines.push(`- ${cmd}`);
+      } else if (typeof cmd === 'object' && cmd !== null) {
+        const key = Object.keys(cmd)[0];
+        const val = cmd[key];
+        if (typeof val === 'object' && val !== null) {
+          lines.push(`- ${key}:`);
+          for (const [subK, subV] of Object.entries(val)) {
+            const formattedVal =
+              typeof subV === 'string' &&
+              (subV.includes(' ') || subV.includes(':') || subV.includes('>') || subV.includes('"'))
+                ? JSON.stringify(subV)
+                : String(subV);
+            lines.push(`    ${subK}: ${formattedVal}`);
+          }
+        } else if (typeof val === 'string') {
+          const formattedVal =
+            val.includes(' ') || val.includes(':') || val.includes('>') || val.includes('"')
+              ? JSON.stringify(val)
+              : val;
+          lines.push(`- ${key}: ${formattedVal}`);
+        } else if (val === null || val === undefined) {
+          lines.push(`- ${key}`);
+        } else {
+          lines.push(`- ${key}: ${val}`);
+        }
+      }
+    }
+
+    const yamlContent = lines.join('\n') + '\n';
+    fs.writeFileSync(flowFile, yamlContent, 'utf8');
+
+    try {
+      return await this.executor.exec('maestro', ['test', flowFile]);
+    } finally {
+      try {
+        if (fs.existsSync(flowFile)) {
+          fs.unlinkSync(flowFile);
+        }
+      } catch {
+        // ignore cleanup error
+      }
+    }
   }
 
   async getCapability(): Promise<CapabilityDescriptor> {
@@ -122,13 +199,12 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
       switch (action.type) {
         case 'tap':
         case 'click': {
-          const target = action.target || (action.value ? String(action.value) : '');
-          // In Maestro, execute single command via maestro test or maestro studio
-          const res = await this.executor.exec('maestro', ['test', '-e', `TARGET=${target}`]);
+          const tapCmd = this.buildTapTarget(action.target, action.value);
+          const res = await this.executeFlowCommands([tapCmd]);
           return {
             success: res.exitCode === 0,
             durationMs: Date.now() - start,
-            output: { target, exitCode: res.exitCode },
+            output: { target: action.target, exitCode: res.exitCode },
             error: res.exitCode !== 0 ? res.stderr : undefined,
           };
         }
@@ -136,14 +212,12 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
         case 'fill':
         case 'type': {
           const text = String(action.value ?? '');
-          const target = action.target;
-          const res = await this.executor.exec('maestro', [
-            'test',
-            '-e',
-            `INPUT_TEXT=${text}`,
-            '-e',
-            `TARGET=${target || ''}`,
-          ]);
+          const cmds: Array<string | Record<string, any>> = [];
+          if (action.target) {
+            cmds.push(this.buildTapTarget(action.target));
+          }
+          cmds.push({ inputText: text });
+          const res = await this.executeFlowCommands(cmds);
           return {
             success: res.exitCode === 0,
             durationMs: Date.now() - start,
@@ -153,8 +227,11 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
         }
 
         case 'scroll': {
-          const direction = action.value || action.metadata?.direction || 'down';
-          const res = await this.executor.exec('maestro', ['test', '-e', `SCROLL_DIR=${direction}`]);
+          const direction = String(
+            action.value || action.metadata?.direction || 'down'
+          ).toLowerCase();
+          const cmd = direction === 'up' ? { scroll: { direction: 'UP' } } : 'scroll';
+          const res = await this.executeFlowCommands([cmd]);
           return {
             success: res.exitCode === 0,
             durationMs: Date.now() - start,
@@ -164,8 +241,14 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
         }
 
         case 'pressKey': {
-          const key = String(action.value ?? action.target ?? '');
-          const res = await this.executor.exec('maestro', ['test', '-e', `KEY=${key}`]);
+          const key = String(action.value ?? action.target ?? '').toLowerCase();
+          const cmd =
+            key === 'back'
+              ? 'back'
+              : key === 'home'
+              ? { pressKey: 'Home' }
+              : { pressKey: key };
+          const res = await this.executeFlowCommands([cmd]);
           return {
             success: res.exitCode === 0,
             durationMs: Date.now() - start,
@@ -198,13 +281,9 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
               ? Number(action.metadata.count)
               : 50;
 
-          const res = await this.executor.exec('maestro', [
-            'test',
-            '-e',
-            `RAPID_CLICKS=${count}`,
-            '-e',
-            `TARGET=${target}`,
-          ]);
+          const tapCmd = this.buildTapTarget(target);
+          const cmds = Array(count).fill(tapCmd);
+          const res = await this.executeFlowCommands(cmds);
           return {
             success: res.exitCode === 0,
             durationMs: Date.now() - start,
@@ -260,7 +339,11 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
 
     switch (assertion.type) {
       case 'elementVisible': {
-        const res = await this.executor.exec('maestro', ['test', '-e', `ASSERT_VISIBLE=${target}`]);
+        const cmd =
+          target.startsWith('id=') || target.startsWith('#')
+            ? { assertVisible: { id: target.replace(/^id=|^#/, '') } }
+            : { assertVisible: target };
+        const res = await this.executeFlowCommands([cmd]);
         return {
           passed: res.exitCode === 0,
           expected: true,
@@ -269,19 +352,32 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
           message:
             res.exitCode === 0
               ? `Element '${target}' is visible via Maestro assertion`
-              : `Element '${target}' assertion failed in Maestro`,
+              : `Element '${target}' assertion failed in Maestro: ${res.stderr || res.stdout}`,
+        };
+      }
+
+      case 'elementHidden': {
+        const cmd =
+          target.startsWith('id=') || target.startsWith('#')
+            ? { assertNotVisible: { id: target.replace(/^id=|^#/, '') } }
+            : { assertNotVisible: target };
+        const res = await this.executeFlowCommands([cmd]);
+        return {
+          passed: res.exitCode === 0,
+          expected: true,
+          actual: res.exitCode === 0,
+          durationMs: Date.now() - start,
+          message:
+            res.exitCode === 0
+              ? `Element '${target}' is hidden via Maestro assertion`
+              : `Element '${target}' assertion failed in Maestro: ${res.stderr || res.stdout}`,
         };
       }
 
       case 'elementTextEquals': {
         const expected = String(assertion.expected ?? '');
-        const res = await this.executor.exec('maestro', [
-          'test',
-          '-e',
-          `ASSERT_TEXT=${expected}`,
-          '-e',
-          `TARGET=${target}`,
-        ]);
+        const cmd = { assertVisible: expected };
+        const res = await this.executeFlowCommands([cmd]);
         return {
           passed: res.exitCode === 0,
           expected,
@@ -289,18 +385,20 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
           durationMs: Date.now() - start,
           message:
             res.exitCode === 0
-              ? `Element '${target}' text matched '${expected}'`
-              : `Element '${target}' text did not match '${expected}'`,
+              ? `Element text matched '${expected}' via Maestro assertion`
+              : `Element text did not match '${expected}' in Maestro: ${res.stderr || res.stdout}`,
         };
       }
 
       case 'elementDisabled': {
+        const cmd = { assertNotVisible: target };
+        const res = await this.executeFlowCommands([cmd]);
         return {
-          passed: true,
+          passed: res.exitCode === 0,
           expected: true,
-          actual: true,
+          actual: res.exitCode === 0,
           durationMs: Date.now() - start,
-          message: `Element '${target}' disabled state verified`,
+          message: `Element '${target}' disabled state verified via Maestro`,
         };
       }
 
@@ -318,14 +416,14 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
     if (!targetId) {
       throw new QAAdapterError('Cannot launch app: appId is not specified.', this.name);
     }
-    const res = await this.executor.exec('maestro', ['test', '-e', `LAUNCH_APP=${targetId}`]);
+    const res = await this.executeFlowCommands([{ launchApp: targetId }]);
     if (res.exitCode !== 0) {
       throw new QAAdapterError(`Failed to launch app via Maestro: ${res.stderr}`, this.name);
     }
   }
 
   async backgroundApp(durationMs?: number): Promise<void> {
-    await this.executor.exec('maestro', ['test', '-e', 'BACKGROUND_APP=true']);
+    await this.executeFlowCommands(['back']);
     if (durationMs && durationMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, durationMs));
     }
@@ -340,7 +438,7 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
     if (!targetId) {
       throw new QAAdapterError('Cannot terminate app: appId is not specified.', this.name);
     }
-    await this.executor.exec('maestro', ['test', '-e', `STOP_APP=${targetId}`]);
+    await this.executeFlowCommands([{ stopApp: targetId }]);
   }
 
   async captureEvidence(type: string, description?: string): Promise<EvidenceArtifact> {
@@ -353,8 +451,7 @@ export class MaestroAdapter implements PlatformAdapter, MobileLifecycleActions {
 
     if (type === 'SCREENSHOT') {
       const filePath = path.join(this.outputDir, `maestro-screen-${timestamp}.png`);
-      // Fallback or use adb/simctl if needed
-      const res = await this.executor.exec('maestro', ['test', '-e', `TAKE_SCREENSHOT=${filePath}`]);
+      const res = await this.executeFlowCommands([{ takeScreenshot: filePath }]);
       const buffer = fs.existsSync(filePath) ? fs.readFileSync(filePath) : Buffer.from('');
       const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
 

@@ -39,6 +39,8 @@ export async function handleVerifyFix(
       throw new Error(`Invalid testCase provided for regression verification: ${parsed.error.message}`);
     }
     testCase = parsed.data;
+  } else if (finding.metadata?.scenario) {
+    testCase = finding.metadata.scenario as TestCase;
   } else {
     // Attempt to locate original test case from saved plans
     let originalTestCase: TestCase | undefined;

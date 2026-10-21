@@ -148,12 +148,25 @@ export class AccessibilityEngine {
       })
     );
 
-    // Also run tap target size check inside browser
+    // Also run tap target size check inside browser (WCAG 2.2 AAA 44x44 CSS px)
     const tapTargetIssues = await page.evaluate(
       (minW: number, minH: number) => {
         const issues: Array<{ selector: string; html: string; width: number; height: number }> = [];
         const interactive = document.querySelectorAll('button, a[href], input, select, textarea, [role="button"]');
         for (const el of Array.from(interactive)) {
+          // Exemption for inline anchor links inside paragraphs/spans (WCAG 2.5.5 / 2.5.8 exemption)
+          if (el.tagName.toLowerCase() === 'a') {
+            const parent = el.parentElement;
+            const parentTag = parent?.tagName?.toLowerCase();
+            const isInlineProse =
+              Boolean(el.closest('p, span')) ||
+              parentTag === 'p' ||
+              parentTag === 'span';
+            if (isInlineProse) {
+              continue; // Exempt inline prose links
+            }
+          }
+
           const rect = el.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
             if (rect.width < minW || rect.height < minH) {
@@ -176,15 +189,15 @@ export class AccessibilityEngine {
       violations.push({
         id: 'target-size',
         ruleId: 'target-size',
-        description: `Interactive elements must have a touch target size of at least ${minTarget.width}x${minTarget.height}px`,
-        help: 'Ensure touch targets are large enough to easily activate without mis-taps',
+        description: `Interactive elements must have a touch target size of at least ${minTarget.width}x${minTarget.height}px per WCAG 2.2 AAA (2.5.5 / 2.5.8)`,
+        help: 'Ensure touch targets are large enough (44x44 CSS px) to easily activate without mis-taps',
         helpUrl: 'https://www.w3.org/WAI/WCAG21/Understanding/target-size.html',
         impact: 'serious',
-        wcagTags: ['wcag21aa', 'wcag255', 'wcag258'],
+        wcagTags: ['wcag21aa', 'wcag22aaa', 'wcag255', 'wcag258'],
         nodes: tapTargetIssues.map((t: any) => ({
           target: t.selector,
           html: t.html,
-          failureSummary: `Target size ${t.width}x${t.height}px is below ${minTarget.width}x${minTarget.height}px minimum.`,
+          failureSummary: `Target size ${t.width}x${t.height}px is below ${minTarget.width}x${minTarget.height}px requirement.`,
           rect: { x: 0, y: 0, width: t.width, height: t.height },
         })),
       });
@@ -515,7 +528,7 @@ export class AccessibilityEngine {
   }
 
   /**
-   * 5. WCAG 2.1 AAA 2.5.5 / WCAG 2.2 AA 2.5.8: Tap Target Size
+   * 5. WCAG 2.1 AAA 2.5.5 / WCAG 2.2 AA/AAA 2.5.8: Tap Target Size (44x44 CSS px)
    */
   private checkTapTargets(
     elements: ParsedElement[],
@@ -532,6 +545,22 @@ export class AccessibilityEngine {
         el.attributes['role'] === 'button';
 
       if (isInteractive) {
+        // Exemption for inline anchor links inside paragraphs/spans (WCAG 2.5.5 / 2.5.8 exemption)
+        if (el.tagName === 'a') {
+          let curr = el.parent;
+          let isInlineProse = false;
+          while (curr) {
+            if (curr.tagName === 'p' || curr.tagName === 'span') {
+              isInlineProse = true;
+              break;
+            }
+            curr = curr.parent;
+          }
+          if (isInlineProse) {
+            continue; // Exempt inline prose links from 44x44 target size check
+          }
+        }
+
         const widthVal = parseFloat(el.style['width'] || el.attributes['width'] || '');
         const heightVal = parseFloat(el.style['height'] || el.attributes['height'] || '');
 
@@ -552,11 +581,11 @@ export class AccessibilityEngine {
       violations.push({
         id: 'target-size',
         ruleId: 'target-size',
-        description: `Interactive touch targets must be at least ${minTarget.width}x${minTarget.height}px`,
-        help: 'Ensure interactive elements have adequate bounding dimensions to prevent accidental activation',
+        description: `Interactive touch targets must be at least ${minTarget.width}x${minTarget.height}px per WCAG 2.2 AAA`,
+        help: 'Ensure interactive elements have adequate bounding dimensions (44x44 CSS px) to prevent accidental activation',
         helpUrl: 'https://www.w3.org/WAI/WCAG21/Understanding/target-size.html',
         impact: 'serious',
-        wcagTags: ['wcag21aa', 'wcag255', 'wcag258'],
+        wcagTags: ['wcag21aa', 'wcag22aaa', 'wcag255', 'wcag258'],
         nodes: invalidNodes,
       });
     }

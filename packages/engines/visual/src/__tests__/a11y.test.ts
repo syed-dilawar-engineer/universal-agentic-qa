@@ -187,6 +187,33 @@ describe('AccessibilityEngine', () => {
       const result = engine.auditHtml(html);
       expect(result.violations.some((v) => v.id === 'target-size')).toBe(false);
     });
+
+    it('exempts inline anchor links inside paragraphs and spans per WCAG 2.5.5 / 2.5.8 exemption', () => {
+      const html = `
+        <div>
+          <p>
+            Please review our <a href="/terms" style="width: 20px; height: 16px;">terms of service</a> for details.
+          </p>
+          <span>
+            Contact <a href="/help" style="width: 15px; height: 14px;">support</a> anytime.
+          </span>
+        </div>
+      `;
+
+      const result = engine.auditHtml(html);
+      expect(result.violations.some((v) => v.id === 'target-size')).toBe(false);
+    });
+
+    it('flags non-inline standalone anchor links below 44x44px', () => {
+      const html = `
+        <div>
+          <a href="/standalone" style="width: 20px; height: 20px;">Link</a>
+        </div>
+      `;
+
+      const result = engine.auditHtml(html);
+      expect(result.violations.some((v) => v.id === 'target-size')).toBe(true);
+    });
   });
 
   describe('Button Accessible Names', () => {
