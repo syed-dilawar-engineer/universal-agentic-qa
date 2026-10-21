@@ -11,6 +11,6 @@ export default defineConfig({
   noExternal: [/^@agentic-qa\//],
   external: ['playwright', 'playwright-core', 'fsevents'],
   banner: {
-    js: `import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);`,
+    js: `#!/usr/bin/env node\nimport { createRequire } from 'node:module'; const require = createRequire(import.meta.url);`,
   },
 });

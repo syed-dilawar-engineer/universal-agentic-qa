@@ -17,8 +17,27 @@ export * from './commands/verify-fix.js';
 
 import { runCli } from './cli.js';
 
-// Auto-run if executed directly as entrypoint
-if (import.meta.url === `file://${process.argv[1]}`) {
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// Auto-run if executed directly as entrypoint or via symlink/CLI wrapper
+function isDirectExecution(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    const currentFile = fileURLToPath(import.meta.url);
+    const invokedFile = fs.realpathSync(process.argv[1]);
+    return (
+      currentFile === invokedFile ||
+      process.argv[1].endsWith('universal-agentic-qa') ||
+      process.argv[1].endsWith('qa') ||
+      process.argv[1].endsWith('index.js')
+    );
+  } catch {
+    return true;
+  }
+}
+
+if (isDirectExecution()) {
   runCli(process.argv).catch((err) => {
     console.error(err);
     process.exit(1);

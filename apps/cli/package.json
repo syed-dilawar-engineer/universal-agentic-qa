@@ -1,15 +1,15 @@
 {
   "name": "universal-agentic-qa",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Deterministic, zero-hallucination agentic QA verification engine across Web, Mobile, Desktop, and APIs",
   "author": "Syed Dilawar Hussain <syed.dilawar.se@gmail.com>",
   "license": "MIT",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
-    "universal-agentic-qa": "./bin/qa.js",
-    "qa": "./bin/qa.js"
+    "universal-agentic-qa": "dist/index.js",
+    "qa": "dist/index.js"
   },
   "homepage": "https://github.com/syed-dilawar-engineer/universal-agentic-qa#readme",
   "repository": {
@@ -45,6 +45,13 @@
     "prepublishOnly": "tsup"
   },
   "dependencies": {
+    "cli-table3": "^0.6.5",
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.1",
+    "playwright": "^1.50.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
     "@agentic-qa/adapter-desktop": "workspace:*",
     "@agentic-qa/adapter-mobile": "workspace:*",
     "@agentic-qa/adapter-web": "workspace:*",
@@ -53,13 +60,6 @@
     "@agentic-qa/engine-visual": "workspace:*",
     "@agentic-qa/reporting": "workspace:*",
     "@agentic-qa/schemas": "workspace:*",
-    "cli-table3": "^0.6.5",
-    "commander": "^12.1.0",
-    "picocolors": "^1.1.1",
-    "playwright": "^1.50.0",
-    "zod": "^3.24.1"
-  },
-  "devDependencies": {
     "@types/node": "^22.13.0",
     "tsup": "^9.0.0",
     "typescript": "^5.7.3"
