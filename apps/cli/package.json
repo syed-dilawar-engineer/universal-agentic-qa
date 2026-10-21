@@ -1,17 +1,27 @@
 {
-  "name": "@agentic-qa/cli",
+  "name": "universal-agentic-qa",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
+    "universal-agentic-qa": "./bin/qa.js",
     "qa": "./bin/qa.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/syed-dilawar-engineer/universal-agentic-qa.git"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsup src/index.ts --format esm --clean",
     "typecheck": "tsc -b --noEmit",
     "dev": "node ./dist/index.js",
-    "start": "node ./dist/index.js"
+    "start": "node ./dist/index.js",
+    "prepublishOnly": "tsup src/index.ts --format esm --clean"
   },
   "dependencies": {
     "@agentic-qa/adapter-desktop": "workspace:*",
@@ -25,10 +35,12 @@
     "cli-table3": "^0.6.5",
     "commander": "^12.1.0",
     "picocolors": "^1.1.1",
+    "playwright": "^1.50.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
+    "tsup": "^9.0.0",
     "typescript": "^5.7.3"
   }
 }
