@@ -1,7 +1,7 @@
 # Universal Agentic QA Engine
 
-[![CI](https://github.com/agentic-qa/universal-agentic-qa-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/agentic-qa/universal-agentic-qa-engine/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/syed-dilawar-engineer/agentic-qa/actions/workflows/ci.yml/badge.svg)](https://github.com/syed-dilawar-engineer/agentic-qa/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node: >=20](https://img.shields.io/badge/Node-%3E%3D20.0.0-brightgreen.svg)](package.json)
 [![TypeScript: Strict](https://img.shields.io/badge/TypeScript-Strict-blue.svg)](tsconfig.json)
 [![Tests: 322 Passing](https://img.shields.io/badge/Tests-322%2F322%20Passing-brightgreen.svg)](tests/)
@@ -104,8 +104,8 @@ graph LR
 ### 1. Installation & Build
 
 ```bash
-git clone https://github.com/agentic-qa/universal-agentic-qa-engine.git
-cd universal-agentic-qa-engine
+git clone https://github.com/syed-dilawar-engineer/agentic-qa.git
+cd agentic-qa
 pnpm install
 pnpm run build
 ```
@@ -284,4 +284,4 @@ pnpm run test:watch
 
 ## License
 
-Universal Agentic QA Engine is open-source software licensed under the **[Apache License 2.0](LICENSE)**.
+Universal Agentic QA Engine is open-source software licensed under the **[MIT License](LICENSE)**.

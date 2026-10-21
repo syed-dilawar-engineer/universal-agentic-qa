@@ -4,7 +4,7 @@
   "private": true,
   "description": "Production-oriented, open-source, AI-agent-driven QA automation platform",
   "author": "Antigravity Team",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "packageManager": "pnpm@10.8.1",
   "engines": {
     "node": ">=20.0.0"
