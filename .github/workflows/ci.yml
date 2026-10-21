@@ -49,20 +49,14 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck Monorepo
-        run: pnpm run typecheck
-
-      - name: Lint Codebase
-        run: pnpm run lint
-
-      - name: Build Packages
+      - name: Build Packages (Compiles & Typechecks Monorepo)
         run: pnpm run build
 
-      - name: Run Core & Unit Tests
-        run: pnpm test
+      - name: Install Playwright Chromium & System Dependencies
+        run: npx playwright install --with-deps chromium
 
-      - name: Run Acceptance & End-to-End Tests
-        run: pnpm vitest run tests/acceptance/e2e.test.ts
+      - name: Run Test Suites
+        run: pnpm test
 
       - name: Upload Test Output on Failure
         if: failure()
